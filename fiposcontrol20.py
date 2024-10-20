@@ -37,44 +37,52 @@ import time
 import math
 import pickle
 import numpy as np
-#import trenz_onewire as pc_onewire
+# import trenz_onewire as pc_onewire
 from intelhex import IntelHex
-#import pbconstants as pbc
+# import pbconstants as pbc
 import canhandler_no_thread as canhandler
 import pcfunctions
-#import relaycontrol
-#import trenz_io
+
+# import relaycontrol
+# import trenz_io
 
 VERSION = '0.8'
 
 SYNC_PULSE_WIDTH = 0.1
-BRDCAST_ALL = 20000 # 0x4E20
-BRDCAST_POS = 20001 # 0x4E21
-BRDCAST_FID = 20002 # 0x4E22
-GEAR_RATIO = (46.0 / 14.0 + 1)**4
+BRDCAST_ALL = 20000  # 0x4E20
+BRDCAST_POS = 20001  # 0x4E21
+BRDCAST_FID = 20002  # 0x4E22
+GEAR_RATIO = (46.0 / 14.0 + 1) ** 4
+
 
 def clamp(value, min_val, max_val):
     return max(min(max_val, value), min_val)
+
 
 def nint(value):
     # Round to nearest integer.
     return int(round(value))
 
+
 def get_bytes(response, byte_range):
     return response[byte_range[0]:byte_range[1]]
 
+
 def set_bit(value, bit):
     # Set specific bit in value.
-    return value | (1<<bit)
+    return value | (1 << bit)
+
 
 def flip_byte_order(byte_array):
     #  Flips the byte order (LSB-> MSB).
     return bytearray([byte for byte in reversed(byte_array)])
 
+
 def format_byte_str(value, fill):
     # Format integer as a hexadecimal string with specified length.
     # a nibble has length 1 and a byte length 2
     return str(hex(value).replace('0x', '')).zfill(fill)
+
 
 def imons_conversion(imon):
     """
@@ -83,12 +91,14 @@ def imons_conversion(imon):
     imon_1 = int.from_bytes(flip_byte_order(get_bytes(imon, (0, 4))), byteorder='big')
     imon_2 = int.from_bytes(flip_byte_order(get_bytes(imon, (4, 8))), byteorder='big')
     adc_vals = (imon_1, imon_2)
-    return tuple([round((3300/409600)*adc_val/0.13, 2) for adc_val in adc_vals])
+    return tuple([round((3300 / 409600) * adc_val / 0.13, 2) for adc_val in adc_vals])
+
 
 def generic_conversion(raw):
     return int.from_bytes(raw, 'little')
 
-class FiposControl():
+
+class FiposControl:
 
     def __init__(self, busids, debug_level=0, verbose=False):
         # busids:  list of can buses
@@ -100,36 +110,34 @@ class FiposControl():
         if isinstance(busids, list):
             self.busids = busids
             self.nchan = len(busids)
-        #else:
+        # else:
         #    return 'FAILED: invalid canbus id format (expected list of strings) '
-        #self.canh = canhandler.CANHandler(busids, print, debug_level=0)
+        # self.canh = canhandler.CANHandler(busids, print, debug_level=0)
         with open('temp_calibration.pkl', 'rb') as fp:
             self.posfid_temp_cal = pickle.load(fp)
         self.pcf = pcfunctions.PetalcontrollerFunctions()
-        #self.pt = trenz_io.PtlIO(info_func=print, debug_level=3)
-        #self.rc = relaycontrol.RelayControl(self.pt, print)
-        #self.pt.switch('6V5_PWR_EN', 1)
-        #self.pt.switch('5V25_PWR_EN', 1)
+        # self.pt = trenz_io.PtlIO(info_func=print, debug_level=3)
+        # self.rc = relaycontrol.RelayControl(self.pt, print)
+        # self.pt.switch('6V5_PWR_EN', 1)
+        # self.pt.switch('5V25_PWR_EN', 1)
         if self.debug_level:
             print(busids)
-        self.canh = canhandler.CANHandler(busids) #, print, debug_level=0)
-        #self._pcow = pc_onewire.PC_OneWire(verbose=True)
-        #self._pcow.restart_ow_thread()
+        self.canh = canhandler.CANHandler(busids)  # , print, debug_level=0)
+        # self._pcow = pc_onewire.PC_OneWire(verbose=True)
+        # self._pcow.restart_ow_thread()
         self.version = VERSION
 
-    #def __del__(self):
+    # def __del__(self):
     #    self._pcow.stop_ow_thread()
 
-    #def gentle_exit(self):
+    # def gentle_exit(self):
     #    try:
     #        self._pcow.stop_ow_thread()
     #        return 'SUCCESS'
     #    except:
     #        return 'FAIL'
 
-
-
-    #def set_pospwr(self, state, select=None):
+    # def set_pospwr(self, state, select=None):
     #    # state is either 'on', 'off, 0, 1'
     #    # select = None: both units, select = 1 or 2
     #    if state not in ['on', 'off', 0, 1]:
@@ -151,7 +159,7 @@ class FiposControl():
     #    except:
     #        return 'FAIL'
 
-    #def get_pospwr(self):
+    # def get_pospwr(self):
     #    pospwr = {'PS1_FBK':'unknown', 'PS2_FBK':'unknown'}
     #    try:
     #        fbk_status = self.pt.read_HRPG600()
@@ -175,9 +183,9 @@ class FiposControl():
                 print('raw_response', raw_response)
             if return_type in ['raw']:
                 return (True, command, raw_response)
-            #print('return type',return_type)
-            formatted_response = {busid:{} for busid in self.busids}
-            #print(formatted_response)
+            # print('return type',return_type)
+            formatted_response = {busid: {} for busid in self.busids}
+            # print(formatted_response)
             for bus_id, bus_data in raw_response.items():
                 for can_id, item in bus_data.items():
                     if self.debug_level:
@@ -232,9 +240,9 @@ class FiposControl():
     def set_currents(self, devices_by_bus=None, new_currents=None):
         command = 2
         # defaults
-        currents = {'theta':{}, 'phi':{}}
-        currents['theta'] = {'spin_up':0, 'cruise':0, 'creep':0, 'spin_down':0}
-        currents['phi'] = {'spin_up':0, 'cruise':0, 'creep':0, 'spin_down':0}
+        currents = {'theta': {}, 'phi': {}}
+        currents['theta'] = {'spin_up': 0, 'cruise': 0, 'creep': 0, 'spin_down': 0}
+        currents['phi'] = {'spin_up': 0, 'cruise': 0, 'creep': 0, 'spin_down': 0}
 
         if new_currents:
             for m in ['phi', 'theta']:
@@ -244,12 +252,12 @@ class FiposControl():
                             currents[m][p] = clamp(round(new_currents[m][p]), 0, 100)
         data = ''
         for m in ['phi', 'theta']:
-            for p in ['spin_up','spin_down','cruise', 'creep']:
+            for p in ['spin_up', 'spin_down', 'cruise', 'creep']:
                 data += format_byte_str(currents[m][p], 2)
 
         dframe = self.make_dframe(command, devices_by_bus, data)
         if self.debug_level:
-            print('inside set_currents, dframe: '+str(dframe))
+            print('inside set_currents, dframe: ' + str(dframe))
         try:
             return self.canh.send(dframe)
         except:
@@ -262,18 +270,18 @@ class FiposControl():
         self.set_verbose_flag(devices_by_bus, 3)
         self.set_currents(devices_by_bus)
         retval = self.canh.recv()
-        self.set_verbose_flag(devices_by_bus, 1)        
+        self.set_verbose_flag(devices_by_bus, 1)
         return retval
 
     def set_spin_ramps(self, devices_by_bus=None, new_ramps=None):
         command = 3
         # 0 = phi; 1 = theta
-        ramps = {'theta':{}, 'phi':{}}
-        ramps['theta'] = {'cw':{'up':0, 'down':0}, 'ccw':{'up':0, 'down':0}}
-        ramps['phi'] = {'cw':{'up':0, 'down':0}, 'ccw':{'up':0, 'down':0}}
+        ramps = {'theta': {}, 'phi': {}}
+        ramps['theta'] = {'cw': {'up': 0, 'down': 0}, 'ccw': {'up': 0, 'down': 0}}
+        ramps['phi'] = {'cw': {'up': 0, 'down': 0}, 'ccw': {'up': 0, 'down': 0}}
 
-        #ramps = {'theta_creep':2, 'phi_creep':2, 'spin':12}   # spin is for both, theta and phi
-                                                                # and for up / down
+        # ramps = {'theta_creep':2, 'phi_creep':2, 'spin':12}   # spin is for both, theta and phi
+        # and for up / down
         if new_ramps:
             for m in ['phi', 'theta']:
                 if m in new_ramps:
@@ -305,7 +313,7 @@ class FiposControl():
         self.set_verbose_flag(devices_by_bus, 3)
         self.set_spin_ramps(devices_by_bus)
         retval = self.canh.recv()
-        self.set_verbose_flag(devices_by_bus, 1)        
+        self.set_verbose_flag(devices_by_bus, 1)
         return retval
 
     def set_cruise_creep_speed(self, devices_by_bus=None, new_steps=None):
@@ -341,9 +349,9 @@ class FiposControl():
         '''
         command = 5
         # default values
-        steps = {'theta':{}, 'phi':{}}
-        steps['theta'] = {'cw':{'cruise':0, 'creep':0}, 'ccw':{'cruise':0, 'creep':0}}
-        steps['phi'] = {'cw':{'cruise':0, 'creep':0}, 'ccw':{'cruise':0, 'creep':0}}
+        steps = {'theta': {}, 'phi': {}}
+        steps['theta'] = {'cw': {'cruise': 0, 'creep': 0}, 'ccw': {'cruise': 0, 'creep': 0}}
+        steps['phi'] = {'cw': {'cruise': 0, 'creep': 0}, 'ccw': {'cruise': 0, 'creep': 0}}
 
         if new_steps:
             for m in ['theta', 'phi']:
@@ -371,17 +379,14 @@ class FiposControl():
             success = False
         return (success, command, error)
 
-
-
     def get_cruise_creep_speed(self, devices_by_bus=None):
         # retrieves current settings
         # set verbose flag to 3
         self.set_verbose_flag(devices_by_bus, 3)
         self.set_cruise_creep_speed(devices_by_bus)
         retval = self.canh.recv()
-        self.set_verbose_flag(devices_by_bus, 1)        
+        self.set_verbose_flag(devices_by_bus, 1)
         return retval
-
 
     def set_creep_periods(self, devices_by_bus=None, new_periods=None):
 
@@ -422,16 +427,14 @@ class FiposControl():
             return 'FAILED: could not set periods'
         return 'SUCCESS'
 
-
     def get_creep_periods(self, devices_by_bus=None):
         # retrieves current settings
         # set verbose flag to 3
         self.set_verbose_flag(devices_by_bus, 3)
         self.set_creep_periods(devices_by_bus)
         retval = self.canh.recv()
-        self.set_verbose_flag(devices_by_bus, 1)        
+        self.set_verbose_flag(devices_by_bus, 1)
         return retval
-
 
     # Commands 4 - 8: not used
 
@@ -444,12 +447,13 @@ class FiposControl():
         return_type:
         '''
         command = 9
+
         def _conversion(raw):
             return self.pcf.posfid_temps_cal(raw)
 
         dframe = self.make_dframe(command, devices_by_bus)
         if self.debug_level > 1:
-            print('get_temperature dframe: '+str(dframe))
+            print('get_temperature dframe: ' + str(dframe))
         (success, command, data) = self._generic_read_command(_conversion, command, dframe, return_type, delay=10.)
         return (success, command, data)
 
@@ -474,6 +478,7 @@ class FiposControl():
         return_type:
         '''
         command = 11
+
         def _conversion(raw):
             return str(raw[1]) + '.' + str(raw[0])
 
@@ -491,7 +496,8 @@ class FiposControl():
     def get_move_status(self, devices_by_bus=None, return_type='c'):
         command = 13
         dframe = self.make_dframe(command, devices_by_bus)
-        (success, command, data) = self._generic_read_command(generic_conversion, command, dframe, return_type, delay=0.5)
+        (success, command, data) = self._generic_read_command(generic_conversion, command, dframe, return_type,
+                                                              delay=0.5)
         return (success, command, data)
 
     def get_imons(self, devices_by_bus=None, return_type='c'):
@@ -502,8 +508,9 @@ class FiposControl():
 
     def get_bl_version(self, devices_by_bus=None, return_type='c'):
         command = 15
+
         def _conversion(raw):
-            return str(raw[1])+'.'+str(raw[0])
+            return str(raw[1]) + '.' + str(raw[0])
 
         dframe = self.make_dframe(command, devices_by_bus)
 
@@ -513,7 +520,7 @@ class FiposControl():
     def set_fiducial_duty(self, devices_by_bus=None, duty=0.):
         command = 16
         duty = min(100., max(duty, 0.))
-        duty = format_byte_str(int(65535.*duty/100), 4)
+        duty = format_byte_str(int(65535. * duty / 100), 4)
         if devices_by_bus:
             dframe = self._make_dframe(command, devices_by_bus, data=duty)
         else:
@@ -531,7 +538,7 @@ class FiposControl():
             sid = self.canh.send_recv_locked(dframe)
             if return_type in ['r', 'raw']:
                 return (True, command, sid)
-            formatted_sid = {busid:{} for busid in self.busids}
+            formatted_sid = {busid: {} for busid in self.busids}
             for bus_id, bus_data in sid.items():
                 for can_id, item in bus_data.items():
                     formatted_sid[bus_id][can_id] = ":".join("{:02x}".format(c) for c in item)
@@ -539,11 +546,11 @@ class FiposControl():
         except:
             return (False, command, 'Error')
 
-    #def read_sid_lower(self, devices_by_bus=None, return_type='c'):
+    # def read_sid_lower(self, devices_by_bus=None, return_type='c'):
     #    command = 17
     #    return self._get_sid_generic(command, devices_by_bus, return_type)
 
-    #def read_sid_upper(self, devices_by_bus=None, return_type='c'):
+    # def read_sid_upper(self, devices_by_bus=None, return_type='c'):
     #    command = 18
     #    return self._get_sid_generic(command, devices_by_bus, return_type)
 
@@ -580,11 +587,11 @@ class FiposControl():
 
         return (False, command, 'Failed')
 
-    #def check_sid_lower(self, devices_by_bus=None, sid=None):
+    # def check_sid_lower(self, devices_by_bus=None, sid=None):
     #    command = 22
     #    return self._check_sid(command, devices_by_bus, sid)
 
-    #def check_sid_upper(self, devices_by_bus=None, sid=None):
+    # def check_sid_upper(self, devices_by_bus=None, sid=None):
     #    command = 23
     #    return self._check_sid(command, devices_by_bus, sid)
 
@@ -593,7 +600,7 @@ class FiposControl():
         return self._check_sid(command, devices_by_bus, sid)
 
     def update_can_address(self, busid, canid, new_canid):
-        dframe = {busid:[canid]}
+        dframe = {busid: [canid]}
         sid = self.read_sid_short(dframe)
         if sid[0]:
             sid = sid[2][busid][canid]
@@ -634,7 +641,7 @@ class FiposControl():
             dframe = self._make_dframe(command, devices_by_bus, data)
         else:
             dframe = self._make_dframe_broadcast(command, BRDCAST_POS, data)
-        #print(dframe)
+        # print(dframe)
         return (True, command, self.canh.send(dframe))
 
     def get_checksum(self, devices_by_bus=None, return_type='c'):
@@ -648,17 +655,17 @@ class FiposControl():
         (error_code, command, data) = self._generic_read_command(generic_conversion, command, dframe, return_type)
         return (error_code, command, data)
 
-    #def set_currents_legacy(self): #, busid, devices_by_bus=None, currents_by_busid=None):
+    # def set_currents_legacy(self): #, busid, devices_by_bus=None, currents_by_busid=None):
     #    command = 30
     #    return str(command) + ' not yet implemented'
 
-    #def set_motor_params_legacy(self): #, busid, devices_by_bus=None, motor_params_by_busid=None):
+    # def set_motor_params_legacy(self): #, busid, devices_by_bus=None, motor_params_by_busid=None):
     #    command = 31
     #    return str(command) + ' not yet implemented'
 
     # commands 32 - 35 are no longer implemented
 
-    #def get_bl_version_alt(self, devices_by_bus=None, return_type='c'):
+    # def get_bl_version_alt(self, devices_by_bus=None, return_type='c'):
     #    command = 36
     #    #def _conversion(raw):
     #    #    return raw
@@ -667,7 +674,7 @@ class FiposControl():
     #    (error_code, command, data) = self._generic_read_command(generic_conversion, command, dframe, return_type)
     #    return (error_code, command, data)
     #
-    #def get_fw_version_alt(self, devices_by_bus=None, return_type='c'):
+    # def get_fw_version_alt(self, devices_by_bus=None, return_type='c'):
     #    command = 37
     #    #def _conversion(raw):
     #    #    return raw
@@ -683,7 +690,7 @@ class FiposControl():
             data = 1
         data = format_byte_str(data, 2)
         dframe = self.make_dframe(command, devices_by_bus, data)
-        print('inside set_need_double, dframe: '+str(dframe))
+        print('inside set_need_double, dframe: ' + str(dframe))
         return (True, command, self.canh.send(dframe))
 
     def get_runtime(self, devices_by_bus=None, return_type='c'):
@@ -701,7 +708,7 @@ class FiposControl():
         dframe = self.make_dframe(command, devices_by_bus)
         return (True, command, self.canh.send(dframe))
 
-    #def enter_stop_mode_can(self, devices_by_bus=None):
+    # def enter_stop_mode_can(self, devices_by_bus=None):
     #    command = 41
     #    dframe = self.make_dframe(command, devices_by_bus)
     #    return (True, command, self.canh.send(dframe))
@@ -722,6 +729,7 @@ class FiposControl():
 
     def dump_n_bytes(self, devices_by_bus=None, hex_address=None, n_bytes=8, return_type='raw'):
         command = 44
+
         def _conversion(raw):
             return raw.hex()
 
@@ -735,6 +743,7 @@ class FiposControl():
 
     def get_fw_checksum(self, devices_by_bus=None, return_type='c'):
         command = 45
+
         def _conversion(raw):
             return raw.hex()
 
@@ -745,7 +754,8 @@ class FiposControl():
     def get_sync_status(self, devices_by_bus=None, return_type='r'):
         command = 46
         dframe = self.make_dframe(command, devices_by_bus)
-        (error_code, command, data) = self._generic_read_command(generic_conversion, command, dframe, return_type, delay=10.)
+        (error_code, command, data) = self._generic_read_command(generic_conversion, command, dframe, return_type,
+                                                                 delay=10.)
         return (error_code, command, data)
 
     def get_sysclock(self, devices_by_bus=None, return_type='c'):
@@ -754,11 +764,11 @@ class FiposControl():
         (error_code, command, data) = self._generic_read_command(generic_conversion, command, dframe, return_type)
         return (error_code, command, data)
 
-    #def set_fid_pwm_frequency(self): #, devices_by_bus=None, fid_pwm_by_bus=None):
+    # def set_fid_pwm_frequency(self): #, devices_by_bus=None, fid_pwm_by_bus=None):
     #    command = 48
     #    return str(command) + ' not yet implemented'
 
-    #def get_fid_pwm_frequency(self, devices_by_bus=None, return_type='r'):
+    # def get_fid_pwm_frequency(self, devices_by_bus=None, return_type='r'):
     #    command = 49
     #    dframe = self.make_dframe(command, devices_by_bus)
     #    (error_code, command, data) = self._generic_read_command(generic_conversion, command, dframe, return_type)
@@ -775,22 +785,25 @@ class FiposControl():
 
     # command 53: not used
 
-    def set_fid_timed(self): #, devices_by_bus=None, fid_settings_by_bus=None):
+    def set_fid_timed(self):  # , devices_by_bus=None, fid_settings_by_bus=None):
         command = 54
         return str(command) + ' not yet implemented'
 
     def get_fid_status(self, devices_by_bus=None, return_type='raw'):
         command = 55
         dframe = self.make_dframe(command, devices_by_bus)
-        (error_code, command, data) = self._generic_read_command(generic_conversion, command, dframe, return_type, delay=1.)
+        (error_code, command, data) = self._generic_read_command(generic_conversion, command, dframe, return_type,
+                                                                 delay=1.)
         return (error_code, command, data)
 
     # command 56 - 58: not used
 
     def store_params(self, devices_by_bus=None, return_type='c'):
         command = 59
+
         def _conversion(raw):
             return raw.hex()
+
         dframe = self.make_dframe(command, devices_by_bus)
         (error_code, command, data) = self._generic_read_command(_conversion, command, dframe, return_type, delay=27.)
         return (error_code, command, data)
@@ -802,38 +815,43 @@ class FiposControl():
 
     def read_defaults_ram(self, devices_by_bus=None, return_type='r'):
         command = 61
+
         def _conversion(raw):
             return [r.hex() for r in raw]
+
         dframe = self.make_dframe(command, devices_by_bus)
         (error_code, command, data) = self._generic_read_command(_conversion, command, dframe, return_type, delay=5.)
         return (error_code, command, data)
 
-
     def read_defaults_flash(self, devices_by_bus=None, return_type='r'):
         command = 62
+
         def _conversion(raw):
             return [r.hex() for r in raw]
+
         dframe = self.make_dframe(command, devices_by_bus)
         (error_code, command, data) = self._generic_read_command(_conversion, command, dframe, return_type, delay=5.)
         return (error_code, command, data)
 
     def read_inter_priorities(self, devices_by_bus=None, return_type='r'):
         command = 63
+
         def _conversion(raw):
             return [r.hex() for r in raw]
+
         dframe = self.make_dframe(command, devices_by_bus)
         (error_code, command, data) = self._generic_read_command(_conversion, command, dframe, return_type, delay=5.)
-        return (error_code, command, data)    
+        return (error_code, command, data)
 
-    # command 62 - 63: not used
+        # command 62 - 63: not used
 
-    #def read_memory(self, devices_by_bus=None, return_type='r'):
+    # def read_memory(self, devices_by_bus=None, return_type='r'):
     #    command = 64
     #    dframe = self.make_dframe(command, devices_by_bus)
     #    (error_code, command, data) = self._generic_read_command(generic_conversion, command, dframe, return_type)
     #    return (error_code, command, data)
 
-    def write_to_memory(self): #, devices_by_bus=None, data=None):
+    def write_to_memory(self):  # , devices_by_bus=None, data=None):
         command = 65
         if self.verbose:
             print('not implemented yet')
@@ -905,7 +923,7 @@ class FiposControl():
         command = 79
         # motor 0 == phi, motor 1 == theta
 
-        step_size = {'phi':1, 'theta':1}
+        step_size = {'phi': 1, 'theta': 1}
         if step_size_new:
             for m in ['theta', 'phi']:
                 if m in step_size_new:
@@ -915,7 +933,7 @@ class FiposControl():
             data += format_byte_str(step_size[m], 2)
         dframe = self.make_dframe(command, devices_by_bus, data)
         if self.debug_level:
-            print('inside set_creep_step_size, dframe: '+str(dframe))
+            print('inside set_creep_step_size, dframe: ' + str(dframe))
         try:
             return self.canh.send(dframe)
         except:
@@ -925,7 +943,7 @@ class FiposControl():
         command = 80
         # default values
         if not phase_jmp:
-            phase_jmp = {'d0':0, 'd1':0, 'd2':0, 'd3':0, 'd4':0, 'd5':0, 'd6':0, 'd7':0}
+            phase_jmp = {'d0': 0, 'd1': 0, 'd2': 0, 'd3': 0, 'd4': 0, 'd5': 0, 'd6': 0, 'd7': 0}
         print(phase_jmp)
         data = (format_byte_str(phase_jmp['d0'], 2) + \
                 format_byte_str(phase_jmp['d1'], 2) + \
@@ -944,17 +962,16 @@ class FiposControl():
             success = False
         return (success, command, error)
 
-
     def set_short_spin_ramp_parameters_phi(self, devices_by_bus=None, rotation=None):
         # motor 0 = phi
         command = 81
         if not rotation:
-            rotation = {'cw_spinup':0, 'cw_spindown':0, 'ccw_spinup':0, 'ccw_spindown':0}
-            
-        data = (format_byte_str(nint(rotation['cw_spinup']*GEAR_RATIO*10), 4) + \
-                format_byte_str(nint(rotation['cw_spindown']*GEAR_RATIO*10), 4) + \
-                format_byte_str(nint(rotation['ccw_spinup']*GEAR_RATIO*10), 4) + \
-                format_byte_str(nint(rotation['ccw_spindown']*GEAR_RATIO*10), 4))
+            rotation = {'cw_spinup': 0, 'cw_spindown': 0, 'ccw_spinup': 0, 'ccw_spindown': 0}
+
+        data = (format_byte_str(nint(rotation['cw_spinup'] * GEAR_RATIO * 10), 4) + \
+                format_byte_str(nint(rotation['cw_spindown'] * GEAR_RATIO * 10), 4) + \
+                format_byte_str(nint(rotation['ccw_spinup'] * GEAR_RATIO * 10), 4) + \
+                format_byte_str(nint(rotation['ccw_spindown'] * GEAR_RATIO * 10), 4))
 
         dframe = self.make_dframe(command, devices_by_bus, data)
         try:
@@ -968,12 +985,12 @@ class FiposControl():
         # motor 1 = theta
         command = 82
         if not rotation:
-            rotation = {'cw_spinup':0, 'cw_spindown':0, 'ccw_spinup':0, 'ccw_spindown':0}
-            
-        data = (format_byte_str(nint(rotation['cw_spinup']*GEAR_RATIO*10), 4) + \
-                format_byte_str(nint(rotation['cw_spindown']*GEAR_RATIO*10), 4) + \
-                format_byte_str(nint(rotation['ccw_spinup']*GEAR_RATIO*10), 4) + \
-                format_byte_str(nint(rotation['ccw_spindown']*GEAR_RATIO*10), 4))
+            rotation = {'cw_spinup': 0, 'cw_spindown': 0, 'ccw_spinup': 0, 'ccw_spindown': 0}
+
+        data = (format_byte_str(nint(rotation['cw_spinup'] * GEAR_RATIO * 10), 4) + \
+                format_byte_str(nint(rotation['cw_spindown'] * GEAR_RATIO * 10), 4) + \
+                format_byte_str(nint(rotation['ccw_spinup'] * GEAR_RATIO * 10), 4) + \
+                format_byte_str(nint(rotation['ccw_spindown'] * GEAR_RATIO * 10), 4))
 
         dframe = self.make_dframe(command, devices_by_bus, data)
         try:
@@ -995,20 +1012,17 @@ class FiposControl():
             print('not implemented yet')
         return (False, command, 'not implemented yet')
 
-
     def dump_alpha_cw_down(self):
         command = 88
         if self.verbose:
             print('not implemented yet')
         return (False, command, 'not implemented yet')
 
-
     def dump_alpha_ccw_up(self):
         command = 89
         if self.verbose:
             print('not implemented yet')
         return (False, command, 'not implemented yet')
-
 
     def dump_alpha_ccw_down(self):
         command = 90
@@ -1020,7 +1034,7 @@ class FiposControl():
     # |                  move commands and other composite commands                |
     # +-----------------------------------------------------------------------------+
 
-    #def set_creep_speed(self, devices_by_bus=None, new_creep_settings=None):
+    # def set_creep_speed(self, devices_by_bus=None, new_creep_settings=None):
     #    # The creep speed can be modified by changing the creep_steps and the creep_period.
     #    # Creep rotation rate (in RPM at motor shaft) is given by: 300 x (creep_step_size/creep_period)
     #    # The default at KPNO (up to at least Fall 2022) is a creep RPM of 150 (creep_period == 2, creep_step_size == 1)
@@ -1053,14 +1067,14 @@ class FiposControl():
         '''
 
         # initialize the 8 data bytes
-        header = 0                              # 1 byte
-        phi_steps = format_byte_str(0, 5)       # 2.5 bytes
-        theta_steps = format_byte_str(0, 5)     # 2.5 bytes
-        post_pause = format_byte_str(0, 4)      # 2 bytes
+        header = 0  # 1 byte
+        phi_steps = format_byte_str(0, 5)  # 2.5 bytes
+        theta_steps = format_byte_str(0, 5)  # 2.5 bytes
+        post_pause = format_byte_str(0, 4)  # 2 bytes
 
         # end of move table
         header = set_bit(header, 7)
-        #header = self.pcf.set_bit(header, 6)
+        # header = self.pcf.set_bit(header, 6)
 
         direction = direction.lower()
         if direction not in ['cw', 'ccw']:
@@ -1075,41 +1089,41 @@ class FiposControl():
             return 'FAILED: invalid motor argument'
 
         if motor in ['phi']:
-            #// data[0]: bit_5  -- Phi Move
-            #// data[0]: bit_4  -- Phi Cruise
-            #// data[0]: bit_3  -- Phi CCW
+            # // data[0]: bit_5  -- Phi Move
+            # // data[0]: bit_4  -- Phi Cruise
+            # // data[0]: bit_3  -- Phi CCW
             header = set_bit(header, 5)
             if direction in ['ccw']:
                 header = set_bit(header, 3)
             if speed in ['cruise']:
                 header = set_bit(header, 4)
-                motor_steps = int(round(angle*GEAR_RATIO/3.3))
+                motor_steps = int(round(angle * GEAR_RATIO / 3.3))
                 phi_steps = format_byte_str(motor_steps, 5)
             if speed in ['creep']:
-                motor_steps = int(round(angle*GEAR_RATIO/.1))
+                motor_steps = int(round(angle * GEAR_RATIO / .1))
                 phi_steps = format_byte_str(motor_steps, 5)
 
-        else: # theta
-            #// data[0]: bit_2  -- Theta Move
-            #// data[0]: bit_1  -- Theta Cruise
-            #// data[0]: bit_0  -- Theta CCW
+        else:  # theta
+            # // data[0]: bit_2  -- Theta Move
+            # // data[0]: bit_1  -- Theta Cruise
+            # // data[0]: bit_0  -- Theta CCW
             header = set_bit(header, 2)
             if direction in ['ccw']:
                 header = set_bit(header, 0)
             if speed in ['cruise']:
                 header = set_bit(header, 1)
-                motor_steps = int(round(angle*GEAR_RATIO/3.3))
+                motor_steps = int(round(angle * GEAR_RATIO / 3.3))
                 theta_steps = format_byte_str(motor_steps, 5)
             if speed in ['creep']:
-                motor_steps = int(round(angle*GEAR_RATIO/.1))
+                motor_steps = int(round(angle * GEAR_RATIO / .1))
                 theta_steps = format_byte_str(motor_steps, 5)
         header = format_byte_str(header, 2)
         data = str(header + theta_steps[0:1] + phi_steps[0:1] + phi_steps[1:] + theta_steps[1:] + post_pause)
-        #print('data: ', data)
+        # print('data: ', data)
 
         command = 26
         dframe = self.make_dframe(command, devices_by_bus, data)
-        #print('dframe: ' + str(dframe))
+        # print('dframe: ' + str(dframe))
         try:
             retval = self.canh.send(dframe)
             return (True, command, retval)
@@ -1117,7 +1131,7 @@ class FiposControl():
             return (False, command, 'Error')
 
     def move_direct(self, devices_by_bus, direction='cw', speed='cruise', motor='theta', angle=15):
-        print('>>> angle: ',angle)
+        print('>>> angle: ', angle)
         retval = self.move(devices_by_bus, direction, speed, motor, angle)
         if retval not in ['Error']:
             time.sleep(0.1)
@@ -1155,7 +1169,7 @@ class FiposControl():
         command_27 = 27
         command_28 = 28
 
-        #DEBUG = self.debug_level
+        # DEBUG = self.debug_level
 
         if not move_tables:
             return 'FAILED: no movetables', {}, {}, {}
@@ -1174,19 +1188,19 @@ class FiposControl():
 
             busid = str(table['busid'])
             if busid not in self.busids:
-                msg = 'FAILED: requested bus ID not allowed '+str(busid)
+                msg = 'FAILED: requested bus ID not allowed ' + str(busid)
                 print(msg)
                 return msg, {}, {}, {}, {}
 
             nrows = table['nrows']
 
             try:
-                table_movetimes.append([sum(table['move_time']) + sum(table['postpause'])/1000., busid, canid])
+                table_movetimes.append([sum(table['move_time']) + sum(table['postpause']) / 1000., busid, canid])
             except Exception:
                 print('<send_tables> error in movetimes.append')
 
             bitsum = 0
-            max_steps = (1<<20) - 1
+            max_steps = (1 << 20) - 1
             for row in range(nrows):
                 motor_steps_T = table['motor_steps_T'][row]
                 motor_steps_P = table['motor_steps_P'][row]
@@ -1207,22 +1221,22 @@ class FiposControl():
 
                 # initialize the 8 data bytes
 
-                header = 0                                    # 1 byte
-                phi_steps = format_byte_str(0, 5)             # 2.5 bytes
-                theta_steps = format_byte_str(0, 5)           # 2.5 bytes
-                post_pause = format_byte_str(post_pause, 4)   # 2 bytes
+                header = 0  # 1 byte
+                phi_steps = format_byte_str(0, 5)  # 2.5 bytes
+                theta_steps = format_byte_str(0, 5)  # 2.5 bytes
+                post_pause = format_byte_str(post_pause, 4)  # 2 bytes
 
                 # end of move table ?
-                if row == nrows -1: # yup
+                if row == nrows - 1:  # yup
                     header = set_bit(header, 7)
                 else:
                     header = set_bit(header, 6)
 
                 # first phi
                 if motor_steps_P not in [0]:
-                    #// data[0]: bit_5  -- Phi Move
-                    #// data[0]: bit_4  -- Phi Cruise
-                    #// data[0]: bit_3  -- Phi CCW
+                    # // data[0]: bit_5  -- Phi Move
+                    # // data[0]: bit_4  -- Phi Cruise
+                    # // data[0]: bit_3  -- Phi CCW
                     header = set_bit(header, 5)
                     if motor_steps_P < 0:
                         header = set_bit(header, 3)
@@ -1232,9 +1246,9 @@ class FiposControl():
 
                 # now theta
                 if motor_steps_T not in [0]:
-                    #// data[0]: bit_2  -- Theta Move
-                    #// data[0]: bit_1  -- Theta Cruise
-                    #// data[0]: bit_0  -- Theta CCW
+                    # // data[0]: bit_2  -- Theta Move
+                    # // data[0]: bit_1  -- Theta Cruise
+                    # // data[0]: bit_0  -- Theta CCW
                     header = set_bit(header, 2)
 
                     if motor_steps_T < 0:
@@ -1245,15 +1259,15 @@ class FiposControl():
 
                 header = format_byte_str(header, 2)
                 data = str(header + theta_steps[0:1] + phi_steps[0:1] + phi_steps[1:] + theta_steps[1:] + post_pause)
-                d = [int(data[i:i+2], 16) for i in range(0, 16, 2)]
-                bitsum += d[0] + 65536*d[1] + 256*d[2] + d[3] + 256*d[4] + d[5] + 256*d[6] + d[7] + 26
+                d = [int(data[i:i + 2], 16) for i in range(0, 16, 2)]
+                bitsum += d[0] + 65536 * d[1] + 256 * d[2] + d[3] + 256 * d[4] + d[5] + 256 * d[6] + d[7] + 26
                 dframe = (canid, command_26, data)
                 move_commands_by_busid[busid].append(dframe)
 
             checksum_cmd = (canid, command_28, '')
             checksum_commands_by_busid[busid].append(checksum_cmd)
             checksums_by_busid[busid][canid] = bitsum
-            arm_commands_by_busid[busid].append((canid, command_27, '00'))    # activate move table command
+            arm_commands_by_busid[busid].append((canid, command_27, '00'))  # activate move table command
             mcounter += 1
 
         maxtime_index = np.argmax(list(zip(*table_movetimes))[0])
@@ -1262,12 +1276,14 @@ class FiposControl():
         maxmovetime['canid'] = list(zip(*table_movetimes))[2][maxtime_index]
 
         if self.debug_level:
-            print('<_build_can_frames> MAX MOVETIME: '+str(round(maxmovetime['time'], 2)))
+            print('<_build_can_frames> MAX MOVETIME: ' + str(round(maxmovetime['time'], 2)))
             print('<_build_can_frames> MOVETABLES: ' + str(move_commands_by_busid))
             print('<_build_can_frames> CHECKSUM REQUESTS:  ' + str(checksum_commands_by_busid))
             print('<_build_can_frames> CHECKSUMS:  ' + str(checksums_by_busid))
 
-        return ('SUCCESS', move_commands_by_busid, checksum_commands_by_busid, checksums_by_busid, arm_commands_by_busid, maxmovetime)
+        return (
+        'SUCCESS', move_commands_by_busid, checksum_commands_by_busid, checksums_by_busid, arm_commands_by_busid,
+        maxmovetime)
 
     def move_by_table(self, table):
         # mcbb: move_commands_by_busid
@@ -1284,10 +1300,10 @@ class FiposControl():
             return
 
         retval = self.canh.send(mcbb)
-        print('sending movetables. retval: '+str(retval))
+        print('sending movetables. retval: ' + str(retval))
 
         checksums = self.get_checksum()
-        print('returned checksums: '+str(checksums))
+        print('returned checksums: ' + str(checksums))
 
         retval = self.execute_movetable()
         print('execute movetable. retval: ' + str(retval))
@@ -1307,7 +1323,7 @@ class FiposControl():
     # |                  FW UPLOAD                                        |
     # +-------------------------------------------------------------------+
 
-    def FW_send_codesize(self, devices_by_bus):   #send size of firmware code in words
+    def FW_send_codesize(self, devices_by_bus):  # send size of firmware code in words
         try:
             size = str(hex(self.codesize).replace('0x', '')).zfill(8)
             dframe = self._make_dframe(129, devices_by_bus, data=size)
@@ -1315,7 +1331,7 @@ class FiposControl():
         except Exception as exception:
             return 'FAILED: Error sending code size: %s' % str(exception)
 
-    def FW_send_nparts(self, devices_by_bus): #send the number of parts that the code has been divided into
+    def FW_send_nparts(self, devices_by_bus):  # send the number of parts that the code has been divided into
         try:
             parts = str(hex(self.nparts).replace('0x', '')).zfill(8)
             dframe = self._make_dframe(130, devices_by_bus, data=parts)
@@ -1336,9 +1352,10 @@ class FiposControl():
             return 'FAILED: Error sending firmware packet: %s' % str(e)
 
     def FW_get_packet(self, partn=1, packetn=0):
-        #retrieve packet for given part number and packet number from hex file
+        # retrieve packet for given part number and packet number from hex file
         try:
-            packet_addr = self.hexfile_minaddr + (partn - 1)*self.part_size  + 4*packetn      #start address of 4 byte packet
+            packet_addr = self.hexfile_minaddr + (
+                        partn - 1) * self.part_size + 4 * packetn  # start address of 4 byte packet
             packet = ''
             packet_byte = [0, 0, 0, 0]
             checksum_byte = [0, 0, 0, 0]
@@ -1395,7 +1412,7 @@ class FiposControl():
 
     def FW_enter_bootmode128(self, devices_by_bus=None, pospower=None):
 
-        #response = input('\nSwitch the power off/on then hit return within 2 seconds ....')
+        # response = input('\nSwitch the power off/on then hit return within 2 seconds ....')
 
         bootmode_code = '4d2e452e4c657669'
 
@@ -1406,7 +1423,7 @@ class FiposControl():
             print('1')
             raw_response = self.canh.send_recv_locked(dframe)
             print('2')
-            #if self.verbose:
+            # if self.verbose:
             print('Commnd 128 - return_data: ', str(raw_response))
 
             response = {}
@@ -1441,43 +1458,45 @@ class FiposControl():
             self.hexfile = IntelHex(hex_file)
             self.hexfile_minaddr = self.hexfile.minaddr()
             self.hexfile_maxaddr = self.hexfile.maxaddr()
-            #self.hexfile_minaddr = 134225920
-            #self.hexfile_maxaddr = 134225920+15999
-            #self.hexfile_minaddr = 134225920+16000
-            #self.hexfile_maxaddr = 134261151
-            #code size in 32-bit words hex
+            # self.hexfile_minaddr = 134225920
+            # self.hexfile_maxaddr = 134225920+15999
+            # self.hexfile_minaddr = 134225920+16000
+            # self.hexfile_maxaddr = 134261151
+            # code size in 32-bit words hex
             self.codesize = int(math.ceil(float(self.hexfile_maxaddr - self.hexfile_minaddr + 1) / 4))
             self.nparts = int(math.ceil(float(self.hexfile_maxaddr - self.hexfile_minaddr + 1) / self.part_size))
             if self.verbose:
                 print(' hexfile maxaddr: ' + str(self.hexfile_maxaddr))
                 print(' hexfile minaddr: ' + str(self.hexfile_minaddr))
-                print(' number of packets: '+ str(int(math.ceil(float(self.hexfile_maxaddr - self.hexfile_minaddr + 1) / 4))))
+                print(' number of packets: ' + str(
+                    int(math.ceil(float(self.hexfile_maxaddr - self.hexfile_minaddr + 1) / 4))))
                 for p_nr in range(int(self.nparts)):
-                    print(' packets_in 1 ' + str(self.FW_get_packets_in_n(p_nr+1)))
-                    #print(' packets_in 2 ' + str(self.FW_get_packets_in_n(2)))
+                    print(' packets_in 1 ' + str(self.FW_get_packets_in_n(p_nr + 1)))
+                    # print(' packets_in 2 ' + str(self.FW_get_packets_in_n(2)))
                 print(' nparts ' + str(self.nparts))
             self.FW_send_codesize(devices_by_bus)
             time.sleep(0.01)
 
             self.FW_send_nparts(devices_by_bus)
             time.sleep(0.3)
-            #loop through parts
+            # loop through parts
             for count in range(1, (self.nparts + 1)):
                 if self.verbose:
                     print('programming part ' + str(count))
                 time.sleep(1)
-                #packet_array = []
+                # packet_array = []
                 for packet in range(0, self.FW_get_packets_in_n(count)):
-                    #packet_array = []
+                    # packet_array = []
                     packet_np, chksum = self.FW_get_packet(count, packet)
-                    #packet_array.append(packet_np)
+                    # packet_array.append(packet_np)
                     self.FW_send_packet(devices_by_bus, count, packet, packet_np, chksum)
                     time.sleep(0.002)
                 time.sleep(.5)
-                #print(packet_array)
+                # print(packet_array)
             return 'SUCCESS'
         except Exception as e:
             return 'FAILED: Error with bootloader programming: %s' % str(e)
+
 
 if __name__ == '__main__':
     fipos = FiposControl('can0')

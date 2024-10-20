@@ -259,11 +259,11 @@ def distance(a, b):
     return np.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
 
 
-class MoveMeasure():
-    def __init__(self, dev_by_bus=None, camera_name='STi', verbose=False, debug_level=0):
+class MoveMeasure:
+    def __init__(self, dev_by_bus=None, camera_name='ST8300', verbose=False, debug_level=0):
         self.verbose = verbose
-        self.camera_name = camera_name  # .lower()
-        # self.camera = sbigcam.SBIGCam()
+        self.camera_name = camera_name
+        self.camera = None
         # camera
         self.fipos = fiposcontrol.FiposControl(['can0'], debug_level, verbose)
         self.dev_by_bus = dev_by_bus
@@ -271,7 +271,7 @@ class MoveMeasure():
         self.arc_calibration_available_theta = False
         self.range_calibration_available_phi = False
         self.range_calibration_available_theta = False
-        self.microns_per_pixel = 131
+        self.microns_per_pixel = 0
 
         self.number_of_correction_moves = 3
         self.center_phi = None  # tupel with (x,y)
@@ -286,38 +286,41 @@ class MoveMeasure():
         self.backlash_angle = 3.
 
         self.window = False
-        self.window_x = [0., 0.]
-        self.window_y = [0., 0.]
+        # window values have been set based on the full image size of the ST8300 camera
+        self.window_x = [0, 3352]
+        self.window_y = [0, 2532]
+        self.fiducial_window_x = None
+        self.fiducial_window_y = None
         self.speed_mode_cruise_phi = 'default'
         self.speed_mode_creep_phi = 'default'
         self.speed_mode_cruise_theta = 'default'
         self.speed_mode_creep_theta = 'default'
 
         self.creep_threshold_theta = 4.
-        self.creep_thershold_phi = 4.
-        self.exptime = 20.
-        self.targetdistance = 0.2
+        self.creep_threshold_phi = 4.
+        self.exp_time = 20.
+        self.target_distance = 0.2
 
-        self.use_fiducials = False
-        self.fiducial_reference_centroids = {}
+        self.use_fiducials = True
+        self.fiducial_center = [0, 0]
         self.fiducial_search_radius = 3  # we look inside a circle of this size around the fiducial centroid
         self.init_camera()
         # self.set_speed_mode_creep(speed_mode_creep_phi='default', speed_mode_creep_theta='default')
         # self.set_speed_mode_cruise(speed_mode_cruise_phi='default', speed_mode_cruise_theta='default')
 
-    def version(self):
+    @staticmethod
+    def get_version():
         return str(VERSION)
 
     def init_camera(self):
         if self.camera_name in ['STi', 'ST8300']:
-            import sbigcam
             self.camera = sbigcam.SBIGCam()
             self.camera.select_camera(self.camera_name)
             # Time of exposure in between 90ms and 3600000ms
             if not self.camera.open_camera():
                 print("Can't establish connection to camera")
                 sys.exit()
-            self.camera.set_exposure_time(self.exptime)
+            self.camera.set_exposure_time(self.exp_time)
         if self.camera_name in ['zwo']:
             import zwoasi as asi
             asi.init('/home/msdos/fvc/asi/ASI_linux_mac_SDK_V1.20.1/lib/x64/libASICamera2.so')
@@ -329,7 +332,7 @@ class MoveMeasure():
         if self.camera_name in ['sti']:
             self.camera.close_camera()
         if self.camera_name in ['zwo']:
-            self.camera.close()
+            self.camera.close_camera()
 
     def set_camera_scale(self, microns_per_pixel=131):
         self.microns_per_pixel = microns_per_pixel
@@ -341,12 +344,13 @@ class MoveMeasure():
         print('Camera scale: ' + str(self.microns_per_pixel) + ' microns per pixel')
         return self.microns_per_pixel
 
-    def set_targetdistance(self, targetdistance):
-        self.targetdistance = targetdistance
+    def set_target_distance(self, target_distance):
+        self.target_distance = target_distance
 
-    def readback_taregtdistance(self):
-        return self.targetdistance
+    def get_target_distance(self):
+        return self.target_distance
 
+    # TODO: remove function?
     def get_all_centroids(self, camera, nspots=1, fboxsize=7):
         image = camera.start_exposure()
         nspots = 1 + len(self.fiducial_reference_centroids)
@@ -358,54 +362,159 @@ class MoveMeasure():
         print('centroids', centroids)
         return centroids
 
-    def set_window(self, mode='Full', win_x=[0., 0.], win_y=[0., 0.]):
-        if mode.lower() in ['full']:
+    """Sets a window such that any future calls to get_centroids will only generate a FITS file of the specified
+    window, with all coordinates adjusted relative to the window size"""
+
+    # TODO: need to reset window mode between images!!!
+    def set_window(self, mode='Full', win_x=None, win_y=None):
+        if mode.lower() in ['full'] or not win_x or not win_y:
             self.window = False
-            print('window mode off')
+            print('Window mode off')
         else:
             self.window = True
             self.window_x[0], self.window_x[1] = win_x
             self.window_y[0], self.window_y[1] = win_y
             print('Window mode on: x_win: ' + str(self.window_x) + '  y_win: ' + str(self.window_y))
 
-    def get_centroids(self, writefitsfile=False, writeregionfile=False, nspots=1, fboxsize=7, flipimage=False):
-        if self.camera_name in ['STi', 'ST8300']:
-            image = self.camera.start_exposure()
-        if self.camera_name in ['zwo']:
-            image = self.camera.capture()
-            print('TYPE', type(image))
-            print('SHAPE', np.shape(image))
-        if flipimage:
+    """Given the window where the fiducial centroids are, returns the centroids"""
+
+    def get_fiducial_centroids(self, win_x, win_y, write_fits_file=False, write_region_file=False, write_conf_file=False
+                               , save_full=False, dir_name=None, nspots=4, fboxsize=7):
+        image = self.camera.start_exposure()
+        self.set_window('fid', win_x, win_y)
+        crop = image[self.window_y[0]:self.window_y[1], self.window_x[0]:self.window_x[1]]
+        datestr, timestr = get_datetime_string()
+        directory = './data'
+        if dir_name:
+            directory = f"./data/{dir_name}"
+        print(directory)
+        if write_fits_file:
+            # save full FITS file
+            if save_full:
+                outfile = f"{datestr}_{timestr}_full.fits"
+                fits.writeto(outfile, image)
+                shutil.move(outfile, directory)
+            # save cropped FITS file (just the window)
+            outfile = f"{datestr}_{timestr}_crop.fits"
+            fits.writeto(outfile, crop)
+            shutil.move(outfile, directory)
+
+        xCenSub, yCenSub, peaks, FWHMSub, _ = multicens.multiCens(crop, n_centroids_to_keep=nspots, verbose=False,
+                                                                  write_fits=False, size_fitbox=fboxsize)
+        if write_region_file:
+            outfile = f"{datestr}_{timestr}_crop.reg"
+            f = open(outfile, 'w')
+            f.write('global color=magenta font="helvetica 13 normal"\n')
+            for i in range(len(xCenSub)):
+                text = f"circle {xCenSub[i] + 1} {yCenSub[i] + 1} {FWHMSub[i] / 2}\n"
+                f.write(text)
+            f.close()
+            shutil.move(outfile, directory)
+
+        if write_conf_file:
+            config = ConfigObj()
+            config.filename = f"{datestr}_{timestr}_fiducials.conf"
+            for i in range(len(xCenSub)):
+                key = f"fid_{i}"
+                config[key] = {}
+                config[key]['x_coord'] = xCenSub[i] + self.window_x[0]
+                config[key]['y_coord'] = yCenSub[i] + self.window_y[0]
+                config[key]['peak'] = peaks[i]
+                config[key]['FWHM'] = FWHMSub[i]
+            config.write()
+            shutil.move(config.filename, directory)
+
+        return list(zip(xCenSub, yCenSub)), peaks, FWHMSub
+
+    @staticmethod
+    def unpack_fiducial_conf(self, filename):
+        config = ConfigObj(filename)
+        fid_list = []
+        for fid in config.values():
+            fid_list.append([float(fid['x_coord']), float(fid['y_coord'])])
+        return sorted(fid_list, key=lambda x: x[0])
+
+    """Takes in list of centroid coordinates of a fiducial and computes the microns to pixel ratio"""
+
+    @staticmethod
+    def camera_scale_from_fiducial(self, fiducials):
+        dist_0_1 = distance(fiducials[0], fiducials[1])  # should be 1.2mm
+        dist_0_3 = distance(fiducials[0], fiducials[3])  # should be 1.6mm
+        dist_1_3 = distance(fiducials[1], fiducials[3])  # should be 2mm
+        return np.mean([1200 / dist_0_1, 1600 / dist_0_3, 2000 / dist_1_3])
+
+    """Takes in a list of (x,y) points and computes and returns the standard deviation of those points"""
+
+    @staticmethod
+    def point_spread(points):
+        stds = np.std(points, axis=0)
+        return np.sqrt(stds[0] ** 2 + stds[1] ** 2)
+
+    """Takes repeat number of images of the fiducial, computes, returns, and sets class attributes for the fiducial 
+    offset and camera scale"""
+
+    def calibrate_fiducial(self, win_x, win_y, repeat=1, write_files=False):
+        datestr, timestr = get_datetime_string()
+        dir_name = f"{datestr}_{timestr}_fiducial_calibration"
+        if write_files:
+            os.makedirs(f"./data/{dir_name}")
+        fid_0 = []
+        fid_1 = []
+        fid_2 = []
+        fid_3 = []
+        camera_scales = []
+        for i in range(repeat):
+            centroids, peaks, FWHM = self.get_fiducial_centroids(win_x, win_y, write_files, write_files, write_files,
+                                                                 dir_name=dir_name)
+            centroids = sorted(centroids, key=lambda x: x[0])
+            camera_scales.append(self.camera_scale_from_fiducial(centroids))
+            fid_0.append(centroids[0])
+            fid_1.append(centroids[1])
+            fid_2.append(centroids[2])
+            fid_3.append(centroids[3])
+        # perform sanity check to make sure fiducial does not move between images
+        threshold = 0.1
+        if point_spread(fid_0) > threshold or point_spread(fid_1) > threshold \
+                or point_spread(fid_2) > threshold or point_spread(fid_3) > threshold:
+            print("Fiducials move between images")
+            exit(1)
+        # set camera scale
+        self.microns_per_pixel = np.mean(camera_scales)
+        # compute and set fiducial center
+        fid_0_center = np.mean(fid_0, axis=0)
+        fid_1_center = np.mean(fid_1, axis=0)
+        fid_2_center = np.mean(fid_2, axis=0)
+        fid_3_center = np.mean(fid_3, axis=0)
+        fid_centers = [fid_0_center, fid_1_center, fid_2_center, fid_3_center]
+        fid_center = np.mean(fid_centers, axis=0)
+        self.fiducial_center = [fid_center[0] + win_x[0], fid_center[1] + win_y[0]]
+        return self.fiducial_center, self.microns_per_pixel
+
+    """Takes an image and returns the specified number of centroids within that image"""
+
+    def get_centroids(self, write_fits_file=False, write_region_file=False, write_conf_file=False, nspots=1, fboxsize=7,
+                      flip_image=False):
+        image = self.camera.start_exposure()
+        if flip_image:
             # horizontal flip (left-right)
             image = image[:, :: -1]
             # vertical flip
             # image = image[: : -1]
-        # print('TYPE',type(image))
-        # print('SHAPE',np.shape(image))
         if self.window:
             # remember that in Python it is [y,x]
             image = image[self.window_y[0]:self.window_y[1], self.window_x[0]:self.window_x[1]]
 
-        # print('TYPE',type(image))
-        # print('SHAPE',np.shape(image))
-        fits_file_name = ''
-        if writefitsfile:
+        datestr, timestr = get_datetime_string()
+        file_name = 'centroids_zwo_' + datestr + '_' + timestr
+        if write_fits_file:
             print('Writing out FITS file')
-            datestr, timestr = get_datetime_string()
-            outfile = 'centroids_zwo_' + datestr + '_' + timestr + '.fits'
-            fits_file_name = 'centroids_zwo_' + datestr + '_' + timestr
+            outfile = file_name + '.fits'
             fits.writeto(outfile, image)
             # TODO: check if data directory already exists, if not create it
             shutil.move(outfile, './data')
 
-        # image = self.camera.start_exposure()
-        # image = image[imx[0]:imx[1],imy[0]:imy[1]]
-        # print('TYPE',type(image))
-        # print('SHAPE',np.shape(image))
-        # print('Image size ',np.size(image))
         xCenSub, yCenSub, peaks, FWHMSub, _ = multicens.multiCens(image, n_centroids_to_keep=nspots, verbose=False,
                                                                   write_fits=False, size_fitbox=fboxsize)
-        # print(' get centroids >> ' + str(xCenSub[0]) + ' ' + str(yCenSub[0]))
         centroids = None
         if len(xCenSub) > 0:
             if self.window:
@@ -416,9 +525,9 @@ class MoveMeasure():
             except:
                 print("WARNING: No Centroids!")
 
-        if writeregionfile:
+        if write_region_file:
             print('Writing out region file')
-            outfile = fits_file_name + '.reg'
+            outfile = file_name + '.reg'
             f = open(outfile, 'w')
             f.write('global color=magenta font="helvetica 13 normal"\n')
             for i in range(len(xCenSub)):
@@ -426,7 +535,26 @@ class MoveMeasure():
                 f.write(text)
             f.close()
             shutil.move(outfile, './data')
+
+        if write_conf_file:
+            config = ConfigObj()
+            config.filename = f"{file_name}.conf"
+            for i in range(len(xCenSub)):
+                key = f"centroid_{i}"
+                config[key] = {}
+                config[key]['x_coord'] = xCenSub[i] + self.window_x[0]
+                config[key]['y_coord'] = yCenSub[i] + self.window_y[0]
+                config[key]['peak'] = peaks[i]
+                config[key]['FWHM'] = FWHMSub[i]
+            config.write()
+            shutil.move(config.filename, './data')
+
         return list(centroids), peaks, FWHMSub
+
+    """Matches CAN addresses with positioners"""
+
+    def match_positioners(self):
+        pass
 
     def get_pos_centroids(self, centroids):
         # image = camera.start_exposure()
@@ -447,6 +575,8 @@ class MoveMeasure():
         # correction is based on the fiducial_reference_centroids
 
         return centroids
+
+    """Reads in data from config file about location of fiducial centroids if it exists"""
 
     def get_fiducial_reference(self):
         # fiducial centroids ae passed as a dictionary:
@@ -470,6 +600,9 @@ class MoveMeasure():
         self.use_fiducials = True
         return self.fiducial_reference_centroids
 
+    """Given the list of centroids and the location of the fiducial centroids, returns the positioner centroids as a
+    list and the fiducial centroids as a dictionary"""
+
     def identify_fiducials(self, centroids):
         # separates the centroids in pos_centroids and fid_centroids
         #
@@ -492,6 +625,9 @@ class MoveMeasure():
                     fid_centroids[fid_id] = cen
         return pos_centroids, fid_centroids
 
+    """Calculates the center of mass of the fiducial centroids and how much it moved, then adds that quantity to the
+    coordinates of all the positioners"""
+
     def correct_centroids(self, pos_centroids, fid_centroids):
         # always returns a list
         # calculate correction
@@ -506,7 +642,7 @@ class MoveMeasure():
         pos_centroids_corrected = [(x + dx, y + dy) for x, y in pos_centroids]
         return pos_centroids_corrected
 
-    def readback_speed_mode(self, motor):
+    def get_speed_mode(self, motor):
 
         if motor in ['phi']:
             cruise_speed = self.speed_mode_cruise_phi
@@ -529,7 +665,7 @@ class MoveMeasure():
             return 'FAILED: invalid motor'
         return 'SUCCESS'
 
-    def readback_gain(self, motor):
+    def get_gain(self, motor):
 
         if motor in ['phi']:
             cruise_gain = self.gain_phi_cruise
