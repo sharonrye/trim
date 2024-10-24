@@ -70,6 +70,8 @@ import shutil
 
 from os.path import exists
 import argparse
+
+import configobj
 from configobj import ConfigObj
 from scipy import optimize
 import numpy as np
@@ -82,6 +84,16 @@ import fiposcontrol20 as fiposcontrol
 from astropy.io import fits
 
 VERSION = '0.1'
+
+
+# TODO: store IDs of the positioners that did not move?
+class MoveNone(Exception):
+    pass
+
+
+class MoveError(Exception):
+    def __init__(self, moved):
+        self.moved = moved
 
 
 # TODO: change to prewritten library?
@@ -162,9 +174,9 @@ def get_datetime_string():
     ts = time.time()
     st = datetime.datetime.fromtimestamp(ts).strftime('%Y%m%d %H:%M:%S')
     st = st.split(' ')
-    _datestr = st[0][2:]
-    _timestr = st[1].replace(':', '')
-    return _datestr, _timestr
+    _date_str = st[0][2:]
+    _time_str = st[1].replace(':', '')
+    return _date_str, _time_str
 
 
 def round2(value):
@@ -289,8 +301,9 @@ class MoveMeasure:
         # window values have been set based on the full image size of the ST8300 camera
         self.window_x = [0, 3352]
         self.window_y = [0, 2532]
-        self.fiducial_window_x = None
-        self.fiducial_window_y = None
+        self.fid_window_x = [1330, 1400]
+        self.fid_window_y = [1660, 1730]
+        self.movement_threshold = 0.1
         self.speed_mode_cruise_phi = 'default'
         self.speed_mode_creep_phi = 'default'
         self.speed_mode_cruise_theta = 'default'
@@ -376,33 +389,44 @@ class MoveMeasure:
             self.window_y[0], self.window_y[1] = win_y
             print('Window mode on: x_win: ' + str(self.window_x) + '  y_win: ' + str(self.window_y))
 
+    """Sets class attributes for the bounds of the window where the fiducial is"""
+    def set_fiducial_window(self, win_x, win_y):
+        self.fid_window_x = win_x
+        self.fid_window_y = win_y
+
+    """Returns true if the point p is inside the bounds of the window where the fiducial is"""
+
+    def in_fiducial_window(self, p):
+        if self.fid_window_x[0] < p[0] < self.fid_window_x[1] and self.fid_window_y[0] < p[1] < self.fid_window_y[1]:
+            return True
+        else:
+            return False
+
     """Given the window where the fiducial centroids are, returns the centroids"""
 
-    def get_fiducial_centroids(self, win_x, win_y, write_fits_file=False, write_region_file=False, write_conf_file=False
+    def get_fiducial_centroids(self, write_fits_file=False, write_region_file=False, write_conf_file=False
                                , save_full=False, dir_name=None, nspots=4, fboxsize=7):
         image = self.camera.start_exposure()
-        self.set_window('fid', win_x, win_y)
-        crop = image[self.window_y[0]:self.window_y[1], self.window_x[0]:self.window_x[1]]
-        datestr, timestr = get_datetime_string()
+        crop = image[self.fid_window_y[0]:self.fid_window_y[1], self.fid_window_x[0]:self.fid_window_x[1]]
+        date_str, time_str = get_datetime_string()
         directory = './data'
         if dir_name:
             directory = f"./data/{dir_name}"
-        print(directory)
         if write_fits_file:
             # save full FITS file
             if save_full:
-                outfile = f"{datestr}_{timestr}_full.fits"
+                outfile = f"{date_str}_{time_str}_full.fits"
                 fits.writeto(outfile, image)
                 shutil.move(outfile, directory)
             # save cropped FITS file (just the window)
-            outfile = f"{datestr}_{timestr}_crop.fits"
+            outfile = f"{date_str}_{time_str}_crop.fits"
             fits.writeto(outfile, crop)
             shutil.move(outfile, directory)
 
         xCenSub, yCenSub, peaks, FWHMSub, _ = multicens.multiCens(crop, n_centroids_to_keep=nspots, verbose=False,
                                                                   write_fits=False, size_fitbox=fboxsize)
         if write_region_file:
-            outfile = f"{datestr}_{timestr}_crop.reg"
+            outfile = f"{date_str}_{time_str}_crop.reg"
             f = open(outfile, 'w')
             f.write('global color=magenta font="helvetica 13 normal"\n')
             for i in range(len(xCenSub)):
@@ -413,12 +437,12 @@ class MoveMeasure:
 
         if write_conf_file:
             config = ConfigObj()
-            config.filename = f"{datestr}_{timestr}_fiducials.conf"
+            config.filename = f"{date_str}_{time_str}_fiducials.conf"
             for i in range(len(xCenSub)):
                 key = f"fid_{i}"
                 config[key] = {}
-                config[key]['x_coord'] = xCenSub[i] + self.window_x[0]
-                config[key]['y_coord'] = yCenSub[i] + self.window_y[0]
+                config[key]['x_coord'] = xCenSub[i] + self.fid_window_x[0]
+                config[key]['y_coord'] = yCenSub[i] + self.fid_window_y[0]
                 config[key]['peak'] = peaks[i]
                 config[key]['FWHM'] = FWHMSub[i]
             config.write()
@@ -437,7 +461,7 @@ class MoveMeasure:
     """Takes in list of centroid coordinates of a fiducial and computes the microns to pixel ratio"""
 
     @staticmethod
-    def camera_scale_from_fiducial(self, fiducials):
+    def camera_scale_from_fiducial(fiducials):
         dist_0_1 = distance(fiducials[0], fiducials[1])  # should be 1.2mm
         dist_0_3 = distance(fiducials[0], fiducials[3])  # should be 1.6mm
         dist_1_3 = distance(fiducials[1], fiducials[3])  # should be 2mm
@@ -454,8 +478,9 @@ class MoveMeasure:
     offset and camera scale"""
 
     def calibrate_fiducial(self, win_x, win_y, repeat=1, write_files=False):
-        datestr, timestr = get_datetime_string()
-        dir_name = f"{datestr}_{timestr}_fiducial_calibration"
+        self.set_fiducial_window(win_x, win_y)
+        date_str, time_str = get_datetime_string()
+        dir_name = f"{date_str}_{time_str}_fiducial_calibration"
         if write_files:
             os.makedirs(f"./data/{dir_name}")
         fid_0 = []
@@ -464,7 +489,7 @@ class MoveMeasure:
         fid_3 = []
         camera_scales = []
         for i in range(repeat):
-            centroids, peaks, FWHM = self.get_fiducial_centroids(win_x, win_y, write_files, write_files, write_files,
+            centroids, peaks, FWHM = self.get_fiducial_centroids(write_files, write_files, write_files,
                                                                  dir_name=dir_name)
             centroids = sorted(centroids, key=lambda x: x[0])
             camera_scales.append(self.camera_scale_from_fiducial(centroids))
@@ -474,8 +499,8 @@ class MoveMeasure:
             fid_3.append(centroids[3])
         # perform sanity check to make sure fiducial does not move between images
         threshold = 0.1
-        if point_spread(fid_0) > threshold or point_spread(fid_1) > threshold \
-                or point_spread(fid_2) > threshold or point_spread(fid_3) > threshold:
+        if self.point_spread(fid_0) > threshold or self.point_spread(fid_1) > threshold \
+                or self.point_spread(fid_2) > threshold or self.point_spread(fid_3) > threshold:
             print("Fiducials move between images")
             exit(1)
         # set camera scale
@@ -493,7 +518,7 @@ class MoveMeasure:
     """Takes an image and returns the specified number of centroids within that image"""
 
     def get_centroids(self, write_fits_file=False, write_region_file=False, write_conf_file=False, nspots=1, fboxsize=7,
-                      flip_image=False):
+                      flip_image=False, save_dir=''):
         image = self.camera.start_exposure()
         if flip_image:
             # horizontal flip (left-right)
@@ -504,14 +529,14 @@ class MoveMeasure:
             # remember that in Python it is [y,x]
             image = image[self.window_y[0]:self.window_y[1], self.window_x[0]:self.window_x[1]]
 
-        datestr, timestr = get_datetime_string()
-        file_name = 'centroids_zwo_' + datestr + '_' + timestr
+        date_str, time_str = get_datetime_string()
+        file_name = 'centroids_zwo_' + date_str + '_' + time_str
         if write_fits_file:
             print('Writing out FITS file')
             outfile = file_name + '.fits'
             fits.writeto(outfile, image)
             # TODO: check if data directory already exists, if not create it
-            shutil.move(outfile, './data')
+            shutil.move(outfile, f"./data/{save_dir}")
 
         xCenSub, yCenSub, peaks, FWHMSub, _ = multicens.multiCens(image, n_centroids_to_keep=nspots, verbose=False,
                                                                   write_fits=False, size_fitbox=fboxsize)
@@ -534,7 +559,7 @@ class MoveMeasure:
                 text = f"circle {xCenSub[i] + 1 - self.window_x[0]} {yCenSub[i] + 1 - self.window_y[0]} {FWHMSub[i] / 2}\n"
                 f.write(text)
             f.close()
-            shutil.move(outfile, './data')
+            shutil.move(outfile, f"./data/{save_dir}")
 
         if write_conf_file:
             config = ConfigObj()
@@ -547,14 +572,111 @@ class MoveMeasure:
                 config[key]['peak'] = peaks[i]
                 config[key]['FWHM'] = FWHMSub[i]
             config.write()
-            shutil.move(config.filename, './data')
+            shutil.move(config.filename, f"./data/{save_dir}")
 
         return list(centroids), peaks, FWHMSub
 
-    """Matches CAN addresses with positioners"""
+    """Given a 2 lists of positions of positioners, finds which positioner moved/changed positions"""
 
-    def match_positioners(self):
-        pass
+    def find_moved(self, centroids_before, centroids_after):
+        moved = []
+        for after in centroids_after:
+            match = False
+            for before in centroids_before:
+                # NO MAGIC NUMBER ???
+                if distance(before, after) < self.movement_threshold:
+                    match = True
+                    break
+            if not match:
+                moved.append(after)
+        if len(moved) == 1 and not self.in_fiducial_window((moved[0])):
+            return moved
+        elif not moved:
+            raise MoveNone()
+        else:
+            raise MoveError(moved)
+
+    def move_error_handler(self, moved, pos_conf, pos_number, pos_id):
+        if len(moved) == 1 and self.in_fiducial_window(moved[0]):
+            print(f"No positioners moved but fiducial points {moved} appeared to move")
+            return pos_number
+        if len(moved) > 1:
+            pos_moved = moved
+            fid_moved = []
+            for move in moved:
+                if self.in_fiducial_window(move):
+                    pos_moved.remove(move)
+                    fid_moved.append(move)
+            if len(pos_moved) == 1:
+                print(f"Fiducial points {fid_moved} appeared to move")
+                return self.set_pos_config(pos_conf, f"positioner_{pos_number}", pos_number, pos_moved, pos_id)
+            elif not pos_moved:
+                print(f"No positioners moved but fiducial points {fid_moved} moved")
+                return pos_number
+            else:
+                print(f"{pos_moved} moved while attempting to move positioner {pos_id}")
+                return pos_number
+
+    @staticmethod
+    def set_pos_config(pos_conf, key, pos_number, moved, pos_id):
+        pos_conf[key] = {}
+        pos_conf[key]['can_id'] = pos_id
+        pos_conf[key]['x_coord'] = moved[0][0]
+        pos_conf[key]['y_coord'] = moved[0][1]
+        return pos_number + 1
+
+    """Matches CAN addresses with positioners, create a conf file with all the positioners and their current 
+    positioners"""
+
+    def match_positioners(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
+        fp = fiposcontrol.FiposControl(['can0'])
+        can_command_out = fp.get_can_address()
+        pos_ids = can_command_out[2]['can0'].keys()
+        date_str, time_str = get_datetime_string()
+        dir_name = f"{date_str}_{time_str}_positioner_matching"
+        os.makedirs(f"./data/{dir_name}")
+        pos_conf = ConfigObj()
+        pos_conf.filename = f"positioners.conf"
+        pos_number = 0
+        # take an image before moving anything
+        centroids_before, peaks_before, FWHM_before = self.get_centroids(write_fits_file, write_region_file,
+                                                                         False, nspots, fboxsize,
+                                                                         save_dir=dir_name)
+        for pos_id in pos_ids:
+            # TODO: NO MAGIC NUMBERS
+            # ID 10000 corresponds to fiducial
+            if pos_id != 10000:
+                # take image and compute centroids after moving
+                to_move = {'can0': {pos_id: pos_id}}
+                fp.move_direct(to_move, 'cw', motor='phi')
+                centroids_after, peaks_after, FWHM_after = self.get_centroids(write_fits_file, write_region_file,
+                                                                              False, nspots, fboxsize,
+                                                                              save_dir=dir_name)
+                try:
+                    moved = self.find_moved(centroids_before, centroids_after)
+                    pos_number = self.set_pos_config(pos_conf, f"positioner_{pos_number}", pos_number, moved, pos_id)
+                except MoveNone:
+                    # try moving other direction
+                    try:
+                        fp.move_direct(to_move, 'ccw', motor='phi')
+                        print('Tried moving other direction!')
+                        centroids_after, peaks_after, FWHM_after = self.get_centroids(write_fits_file,
+                                                                                      write_region_file,
+                                                                                      False, nspots, fboxsize,
+                                                                                      save_dir=dir_name)
+                        moved = self.find_moved(centroids_before, centroids_after)
+                        pos_number = self.set_pos_config(pos_conf, f"positioner_{pos_number}", pos_number, moved,
+                                                         pos_id)
+                        print("Moved other direction!")
+                    except MoveNone:
+                        print(f"Positioner {pos_id} did not move")
+                    except MoveError as error:
+                        pos_number = self.move_error_handler(error.moved, pos_conf, pos_number, pos_id)
+                except MoveError as error:
+                    pos_number = self.move_error_handler(error.moved, pos_conf, pos_number, pos_id)
+                centroids_before = centroids_after
+        pos_conf.write()
+        shutil.move(pos_conf.filename, f"./data/{dir_name}")
 
     def get_pos_centroids(self, centroids):
         # image = camera.start_exposure()
@@ -1527,10 +1649,10 @@ if __name__ == "__main__":
     print('>> selected cruise scale cw, ccw: ' + str(cruisescale))
     print('>> selected creep scale cw, ccw: ' + str(creepscale))
 
-    datestr, timestr = get_datetime_string()
+    date_str, time_str = get_datetime_string()
     fname = 'linphi_new_'
-    # log_file = open(fname + str(positioner_id) + '_' + str(target_angle) + '_' + speed_mode + '_' + datestr + '_' + timestr + '.log', 'w')
-    pickle_file = open(fname + str(positioner_id) + '_' + str(target_angle) + '_' + datestr + '_' + timestr + '.pkl',
+    # log_file = open(fname + str(positioner_id) + '_' + str(target_angle) + '_' + speed_mode + '_' + date_str + '_' + time_str + '.log', 'w')
+    pickle_file = open(fname + str(positioner_id) + '_' + str(target_angle) + '_' + date_str + '_' + time_str + '.pkl',
                        'wb')
 
     testlog = {'head': {}, 'calibration': {'phi': {}, 'theta': {}}, 'movelog': {}}
@@ -1554,10 +1676,10 @@ if __name__ == "__main__":
     testlog['head']['motor'] = motor
     testlog['head']['test'] = test_to_run
 
-    datestr, timestr = get_datetime_string()
+    date_str, time_str = get_datetime_string()
 
-    testlog['head']['time'] = timestr
-    testlog['head']['date'] = datestr
+    testlog['head']['time'] = time_str
+    testlog['head']['date'] = date_str
     testlog['head']['posid'] = ''
     testlog['head']['targetdistance'] = ''
 
