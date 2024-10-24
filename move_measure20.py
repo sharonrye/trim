@@ -70,6 +70,8 @@ import shutil
 
 from os.path import exists
 import argparse
+
+import configobj
 from configobj import ConfigObj
 from scipy import optimize
 import numpy as np
@@ -82,6 +84,21 @@ import fiposcontrol20 as fiposcontrol
 from astropy.io import fits
 
 VERSION = '0.1'
+
+
+class MoveMultiple(Exception):
+    def __init__(self, moved):
+        self.moved = moved
+
+
+# TODO: store IDs of the positioners that did not move?
+class MoveNone(Exception):
+    pass
+
+
+class FiducialMoved(Exception):
+    def __init__(self, fid):
+        self.fid = fid
 
 
 # TODO: change to prewritten library?
@@ -289,8 +306,9 @@ class MoveMeasure:
         # window values have been set based on the full image size of the ST8300 camera
         self.window_x = [0, 3352]
         self.window_y = [0, 2532]
-        self.fiducial_window_x = None
-        self.fiducial_window_y = None
+        self.fid_window_x = [1330, 1400]
+        self.fid_window_y = [1640, 1730]
+        self.movement_threshold = 0.1
         self.speed_mode_cruise_phi = 'default'
         self.speed_mode_creep_phi = 'default'
         self.speed_mode_cruise_theta = 'default'
@@ -376,13 +394,22 @@ class MoveMeasure:
             self.window_y[0], self.window_y[1] = win_y
             print('Window mode on: x_win: ' + str(self.window_x) + '  y_win: ' + str(self.window_y))
 
+    def set_fiducial_window(self, win_x, win_y):
+        self.fid_window_x = win_x
+        self.fid_window_y = win_y
+
+    def in_fiducial_window(self, p):
+        if self.fid_window_x[0] < p[0] < self.fid_window_x[1] and self.fid_window_y[0] < p[1] < self.fid_window_y[1]:
+            return True
+        else:
+            return False
+
     """Given the window where the fiducial centroids are, returns the centroids"""
 
-    def get_fiducial_centroids(self, win_x, win_y, write_fits_file=False, write_region_file=False, write_conf_file=False
+    def get_fiducial_centroids(self, write_fits_file=False, write_region_file=False, write_conf_file=False
                                , save_full=False, dir_name=None, nspots=4, fboxsize=7):
         image = self.camera.start_exposure()
-        self.set_window('fid', win_x, win_y)
-        crop = image[self.window_y[0]:self.window_y[1], self.window_x[0]:self.window_x[1]]
+        crop = image[self.fid_window_y[0]:self.fid_window_y[1], self.fid_window_x[0]:self.fid_window_x[1]]
         datestr, timestr = get_datetime_string()
         directory = './data'
         if dir_name:
@@ -454,6 +481,7 @@ class MoveMeasure:
     offset and camera scale"""
 
     def calibrate_fiducial(self, win_x, win_y, repeat=1, write_files=False):
+        self.set_fiducial_window(win_x, win_y)
         datestr, timestr = get_datetime_string()
         dir_name = f"{datestr}_{timestr}_fiducial_calibration"
         if write_files:
@@ -474,8 +502,8 @@ class MoveMeasure:
             fid_3.append(centroids[3])
         # perform sanity check to make sure fiducial does not move between images
         threshold = 0.1
-        if point_spread(fid_0) > threshold or point_spread(fid_1) > threshold \
-                or point_spread(fid_2) > threshold or point_spread(fid_3) > threshold:
+        if self.point_spread(fid_0) > threshold or self.point_spread(fid_1) > threshold \
+                or self.point_spread(fid_2) > threshold or self.point_spread(fid_3) > threshold:
             print("Fiducials move between images")
             exit(1)
         # set camera scale
@@ -493,7 +521,7 @@ class MoveMeasure:
     """Takes an image and returns the specified number of centroids within that image"""
 
     def get_centroids(self, write_fits_file=False, write_region_file=False, write_conf_file=False, nspots=1, fboxsize=7,
-                      flip_image=False):
+                      flip_image=False, save_dir=''):
         image = self.camera.start_exposure()
         if flip_image:
             # horizontal flip (left-right)
@@ -511,7 +539,7 @@ class MoveMeasure:
             outfile = file_name + '.fits'
             fits.writeto(outfile, image)
             # TODO: check if data directory already exists, if not create it
-            shutil.move(outfile, './data')
+            shutil.move(outfile, f"./data/{save_dir}")
 
         xCenSub, yCenSub, peaks, FWHMSub, _ = multicens.multiCens(image, n_centroids_to_keep=nspots, verbose=False,
                                                                   write_fits=False, size_fitbox=fboxsize)
@@ -534,7 +562,7 @@ class MoveMeasure:
                 text = f"circle {xCenSub[i] + 1 - self.window_x[0]} {yCenSub[i] + 1 - self.window_y[0]} {FWHMSub[i] / 2}\n"
                 f.write(text)
             f.close()
-            shutil.move(outfile, './data')
+            shutil.move(outfile, f"./data/{save_dir}")
 
         if write_conf_file:
             config = ConfigObj()
@@ -547,14 +575,112 @@ class MoveMeasure:
                 config[key]['peak'] = peaks[i]
                 config[key]['FWHM'] = FWHMSub[i]
             config.write()
-            shutil.move(config.filename, './data')
+            shutil.move(config.filename, f"./data/{save_dir}")
 
         return list(centroids), peaks, FWHMSub
 
-    """Matches CAN addresses with positioners"""
+    """Given a 2 lists of positions of positioners, finds which positioner moved/changed positions"""
 
-    def match_positioners(self):
-        pass
+    def find_moved(self, centroids_before, centroids_after):
+        moved = []
+        for after in centroids_after:
+            match = False
+            for before in centroids_before:
+                # NO MAGIC NUMBER ???
+                if distance(before, after) < self.movement_threshold:
+                    match = True
+                    break
+            if not match:
+                moved.append(after)
+        if len(moved) == 0:
+            raise MoveNone()
+        elif len(moved) > 1:
+            raise MoveMultiple(moved)
+        return moved
+
+    @staticmethod
+    def set_pos_config(pos_conf, key, pos_number, moved, pos_id):
+        pos_conf[key] = {}
+        pos_conf[key]['can_id'] = pos_id
+        pos_conf[key]['x_coord'] = moved[0][0]
+        pos_conf[key]['y_coord'] = moved[0][1]
+        return pos_number + 1
+
+    """Matches CAN addresses with positioners, create a conf file with all the positioners and their current 
+    positioners"""
+
+    def match_positioners(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
+        fp = fiposcontrol.FiposControl(['can0'])
+        can_command_out = fp.get_can_address()
+        pos_ids = can_command_out[2]['can0'].keys()
+        datestr, timestr = get_datetime_string()
+        dir_name = f"{datestr}_{timestr}_positioner_matching"
+        os.makedirs(f"./data/{dir_name}")
+        pos_conf = ConfigObj()
+        pos_conf.filename = f"positioners.conf"
+        pos_number = 0
+        # take an image before moving anything
+        centroids_before, peaks_before, FWHM_before = self.get_centroids(write_fits_file, write_region_file,
+                                                                         False, nspots, fboxsize,
+                                                                         save_dir=dir_name)
+        for pos_id in pos_ids:
+            # TODO: NO MAGIC NUMBERS
+            # ID 10000 corresponds to fiducial
+            if pos_id != 10000:
+                # take image and compute centroids after moving
+                to_move = {'can0': {pos_id: pos_id}}
+                fp.move_direct(to_move, 'cw', motor='phi')
+                centroids_after, peaks_after, FWHM_after = self.get_centroids(write_fits_file, write_region_file,
+                                                                              False, nspots, fboxsize,
+                                                                              save_dir=dir_name)
+                try:
+                    moved = self.find_moved(centroids_before, centroids_after)
+                    pos_number = self.set_pos_config(pos_conf, f"positioner_{pos_number}", pos_number, moved, pos_id)
+                except MoveNone:
+                    # try moving in other direction
+                    try:
+                        fp.move_direct(to_move, 'ccw', motor='phi')
+                        print('Tried moving other direction!')
+                        centroids_after, peaks_after, FWHM_after = self.get_centroids(write_fits_file,
+                                                                                      write_region_file,
+                                                                                      False, nspots, fboxsize,
+                                                                                      save_dir=dir_name)
+                        moved = self.find_moved(centroids_before, centroids_after)
+                        pos_number = self.set_pos_config(pos_conf, f"positioner_{pos_number}", pos_number, moved,
+                                                         pos_id)
+                        print("Moved other direction!")
+                    except MoveNone:
+                        print(f"Positioner {pos_id} did not move")
+                    except MoveMultiple as error:
+                        pos_moved = error.moved
+                        fid_moved = []
+                        for move in error.moved:
+                            if self.in_fiducial_window(move):
+                                pos_moved.remove(move)
+                                fid_moved.append(move)
+                        if len(pos_moved) == 1:
+                            pos_number = self.set_pos_config(pos_conf, f"positioner_{pos_number}", pos_number,
+                                                             pos_moved,
+                                                             pos_id)
+                            print(f"Fiducial points {fid_moved} appeared to move")
+                        else:
+                            print(f"{pos_moved} moved while attempting to move positioner {pos_id}")
+                except MoveMultiple as error:
+                    pos_moved = error.moved
+                    fid_moved = []
+                    for move in error.moved:
+                        if self.in_fiducial_window(move):
+                            pos_moved.remove(move)
+                            fid_moved.append(move)
+                    if len(pos_moved) == 1:
+                        pos_number = self.set_pos_config(pos_conf, f"positioner_{pos_number}", pos_number, pos_moved,
+                                                         pos_id)
+                        print(f"Fiducial points {fid_moved} appeared to move")
+                    else:
+                        print(f"{pos_moved} moved while attempting to move positioner {pos_id}")
+                centroids_before = centroids_after
+        pos_conf.write()
+        shutil.move(pos_conf.filename, f"./data/{dir_name}")
 
     def get_pos_centroids(self, centroids):
         # image = camera.start_exposure()
