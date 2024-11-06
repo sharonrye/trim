@@ -82,6 +82,7 @@ import sbigcam
 import multicens
 import fiposcontrol20 as fiposcontrol
 from astropy.io import fits
+import positioner
 
 VERSION = '0.1'
 
@@ -304,6 +305,7 @@ class MoveMeasure:
         self.fid_window_x = [1330, 1400]
         self.fid_window_y = [1660, 1730]
         self.movement_threshold = 0.1
+        self.positioners = []
         self.speed_mode_cruise_phi = 'default'
         self.speed_mode_creep_phi = 'default'
         self.speed_mode_cruise_theta = 'default'
@@ -390,6 +392,7 @@ class MoveMeasure:
             print('Window mode on: x_win: ' + str(self.window_x) + '  y_win: ' + str(self.window_y))
 
     """Sets class attributes for the bounds of the window where the fiducial is"""
+
     def set_fiducial_window(self, win_x, win_y):
         self.fid_window_x = win_x
         self.fid_window_y = win_y
@@ -451,7 +454,7 @@ class MoveMeasure:
         return list(zip(xCenSub, yCenSub)), peaks, FWHMSub
 
     @staticmethod
-    def unpack_fiducial_conf(self, filename):
+    def unpack_fiducial_conf(filename):
         config = ConfigObj(filename)
         fid_list = []
         for fid in config.values():
@@ -583,7 +586,6 @@ class MoveMeasure:
         for after in centroids_after:
             match = False
             for before in centroids_before:
-                # NO MAGIC NUMBER ???
                 if distance(before, after) < self.movement_threshold:
                     match = True
                     break
@@ -677,6 +679,107 @@ class MoveMeasure:
                 centroids_before = centroids_after
         pos_conf.write()
         shutil.move(pos_conf.filename, f"./data/{dir_name}")
+        return dir_name
+
+    """Set brightness of positioners such that all FWHM < threshold"""
+
+    def calibrate_brightness(self, duty=100, threshold=1.7, nspots=1, fboxsize=7):
+        fp = fiposcontrol.FiposControl(['can0'])
+        points, peaks, FWHM = self.get_centroids(nspots=nspots, fboxsize=fboxsize)
+        while FWHM[0] > threshold:
+            duty = duty / 2
+            fp.set_fiducial_duty(duty=duty)
+            points, peaks, FWHM = self.get_centroids(nspots=nspots, fboxsize=fboxsize)
+
+    @staticmethod
+    def unpack_conf(filename):
+        config = ConfigObj(filename)
+        x = []
+        y = []
+        can_ids = []
+        for centroid in config.values():
+            x.append(float(centroid['x_coord']))
+            y.append(float(centroid['y_coord']))
+            can_ids.append(centroid['can_id'])
+        return x, y, can_ids
+
+    @staticmethod
+    def page_label(points):
+        points = sorted(points, key=lambda x: x[1], reverse=True)
+        split = []
+        prev = 0
+        for i in range(len(points) - 1):
+            if abs(points[i][1] - points[i + 1][1]) > 100:
+                split.append(points[prev:i + 1])
+                prev = i + 1
+        split.append(points[prev:])
+        for i in range(len(split)):
+            split[i] = sorted(split[i], key=lambda x: x[0])
+        labeled = []
+        counter = 0
+        for row in split:
+            for point in row:
+                labeled.append(point + [counter])
+                counter = counter + 1
+        return labeled
+
+    def init_positioners(self, init_filename):
+        X, Y, ids = self.unpack_conf(init_filename)
+        points = list(zip(X, Y, ids))
+        labeled = self.page_label(points)
+        for point in labeled:
+            pos = positioner.Positioner()
+            pos.current_position = [point[0], point[1]]
+            pos.bus_id = point[2]
+            pos.page_id = point[3]
+            pos.set_window()
+            self.positioners.append(pos)
+
+    def calibrate_phi(self):
+        pass
+
+    def calibrate_single_phi(self):
+        fp = fiposcontrol.FiposControl(['can0'])
+        # reset to hardstop
+        to_move = {'can0': {5256: 5256}}
+        fp.move_direct(to_move, motor='phi', angle=200)
+        # make sure to set window
+        self.set_window('crop', [600, 650], [995, 1045])
+        positions = []
+        # take initial image
+        centroid, peak, FWHM = self.get_centroids(write_fits_file=True, save_dir='single_calibration')
+        positions.append(centroid)
+        for i in range(18):
+            fp.move_direct(to_move, direction='ccw', motor='phi', angle=10)
+            centroid, peak, FWHM = self.get_centroids(write_fits_file=True, save_dir='single_calibration')
+            positions.append(centroid)
+            x_lower = int(centroid[0][0] - 25)
+            x_upper = int(centroid[0][0] + 25)
+            y_lower = int(centroid[0][1] - 25)
+            y_upper = int(centroid[0][1] + 25)
+            self.set_window('crop', [x_lower, x_upper], [y_lower, y_upper])
+        return positions
+
+    @staticmethod
+    def rough_moved(centroids_before, centroids_after):
+        moved = []
+        for after in centroids_after:
+            match = False
+            for before in centroids_before:
+                if distance(before, after) < 1:
+                    match = True
+                    break
+            if not match:
+                moved.append(after)
+        return moved
+
+    def rough_find_hardstop_phi(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
+        fp = fiposcontrol.FiposControl(['can0'])
+        fp.move_direct(None, angle=200, motor='phi')
+        points_b, peaks_b, FWHM_b = self.get_centroids(write_fits_file, write_region_file, False, nspots, fboxsize)
+        fp.move_direct(None, angle=200, motor='phi')
+        points_a, peaks_a, FWHM_a = self.get_centroids(write_fits_file, write_region_file, False, nspots, fboxsize)
+        return self.rough_moved(points_b, points_a), points_a
 
     def get_pos_centroids(self, centroids):
         # image = camera.start_exposure()
@@ -1219,60 +1322,60 @@ class MoveMeasure:
             last_centroid = self.get_centroids()
         return step, last_centroid
 
-    def calibrate_phi(self, use_stored_if_available=True):
-        write_conf_file = False
-        positioner_id = list(self.dev_by_bus.values())[0][0]
-        calfile = 'M0' + str(positioner_id) + '_cal.conf'
-        cal_data = None
-        if use_stored_if_available:
-            calfile_exists = exists(calfile)
-            print('calfile exists', calfile_exists)
-            if calfile_exists:
-                cal_data = ConfigObj(calfile, unrepr=True)
-                cal_measured = 0
-                if 'center_phi' in cal_data:
-                    self.center_phi = cal_data['center_phi']
-                    cal_measured += 1
-                if 'radius_phi' in cal_data:
-                    self.radius_phi = cal_data['radius_phi']
-                    cal_measured += 1
-                if cal_measured > 1:
-                    self.arc_calibration_available_phi = True
-
-                range_measured = 0
-                if 'range_limits_phi' in cal_data:
-                    self.range_limits_phi = (ast.literal_eval(cal_data['range_limits_phi'][0]),
-                                             ast.literal_eval(cal_data['range_limits_phi'][1]))
-                    range_measured += 1
-                if 'range_angle_phi' in cal_data:
-                    self.range_angle_phi = cal_data['range_angle_phi']
-                    range_measured += 1
-                if range_measured > 1:
-                    self.range_calibration_available_phi = True
-
-        if not self.arc_calibration_available_phi or not use_stored_if_available:
-            center, radius, calibration_centroids, cali_angles = self.calibrate_arc_phi()
-            print(' arc calibration ')
-            print(center, radius, calibration_centroids, cali_angles)
-            if not cal_data:
-                cal_data = ConfigObj()
-            cal_data['center_phi'] = center
-            cal_data['radius_phi'] = radius
-            self.fipos.move_direct(None, 'ccw', 'cruise', 'phi', 180)
-            write_conf_file = True
-        if not self.range_calibration_available_phi or not use_stored_if_available:
-            range_angle, range_centroids = self.measure_range_phi()
-            print(' range calibration ')
-            print(range_angle, range_centroids)
-            if not cal_data:
-                cal_data = ConfigObj()
-            cal_data['range_limits_phi'] = self.range_limits_phi
-            cal_data['range_angle_phi'] = self.range_angle_phi
-            write_conf_file = True
-
-        if write_conf_file:
-            cal_data.filename = calfile
-            cal_data.write()
+    # def calibrate_phi(self, use_stored_if_available=True):
+    #     write_conf_file = False
+    #     positioner_id = list(self.dev_by_bus.values())[0][0]
+    #     calfile = 'M0' + str(positioner_id) + '_cal.conf'
+    #     cal_data = None
+    #     if use_stored_if_available:
+    #         calfile_exists = exists(calfile)
+    #         print('calfile exists', calfile_exists)
+    #         if calfile_exists:
+    #             cal_data = ConfigObj(calfile, unrepr=True)
+    #             cal_measured = 0
+    #             if 'center_phi' in cal_data:
+    #                 self.center_phi = cal_data['center_phi']
+    #                 cal_measured += 1
+    #             if 'radius_phi' in cal_data:
+    #                 self.radius_phi = cal_data['radius_phi']
+    #                 cal_measured += 1
+    #             if cal_measured > 1:
+    #                 self.arc_calibration_available_phi = True
+    #
+    #             range_measured = 0
+    #             if 'range_limits_phi' in cal_data:
+    #                 self.range_limits_phi = (ast.literal_eval(cal_data['range_limits_phi'][0]),
+    #                                          ast.literal_eval(cal_data['range_limits_phi'][1]))
+    #                 range_measured += 1
+    #             if 'range_angle_phi' in cal_data:
+    #                 self.range_angle_phi = cal_data['range_angle_phi']
+    #                 range_measured += 1
+    #             if range_measured > 1:
+    #                 self.range_calibration_available_phi = True
+    #
+    #     if not self.arc_calibration_available_phi or not use_stored_if_available:
+    #         center, radius, calibration_centroids, cali_angles = self.calibrate_arc_phi()
+    #         print(' arc calibration ')
+    #         print(center, radius, calibration_centroids, cali_angles)
+    #         if not cal_data:
+    #             cal_data = ConfigObj()
+    #         cal_data['center_phi'] = center
+    #         cal_data['radius_phi'] = radius
+    #         self.fipos.move_direct(None, 'ccw', 'cruise', 'phi', 180)
+    #         write_conf_file = True
+    #     if not self.range_calibration_available_phi or not use_stored_if_available:
+    #         range_angle, range_centroids = self.measure_range_phi()
+    #         print(' range calibration ')
+    #         print(range_angle, range_centroids)
+    #         if not cal_data:
+    #             cal_data = ConfigObj()
+    #         cal_data['range_limits_phi'] = self.range_limits_phi
+    #         cal_data['range_angle_phi'] = self.range_angle_phi
+    #         write_conf_file = True
+    #
+    #     if write_conf_file:
+    #         cal_data.filename = calfile
+    #         cal_data.write()
 
     def calibrate_arc_phi(self):
         # fipos = self.fipos
