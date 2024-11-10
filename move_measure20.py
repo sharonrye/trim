@@ -83,193 +83,9 @@ import multicens
 import fiposcontrol20 as fiposcontrol
 from astropy.io import fits
 import positioner
+from move_measure_utils import *
 
 VERSION = '0.1'
-
-
-# TODO: store IDs of the positioners that did not move?
-class MoveNone(Exception):
-    pass
-
-
-class MoveError(Exception):
-    def __init__(self, moved):
-        self.moved = moved
-
-
-# TODO: change to prewritten library?
-def fitcircle(xy):
-    # C.f. http://scipy.github.io/old-wiki/pages/Cookbook/Least_Squares_Circle
-    """Return a best-fit circle for (x,y) data.
-    Input:    xy ... cartesian points of the form [[x1,y1], [x2,y2], ...]
-    Returns:  xy_ctr ... best-fit circle center, in the form [x_center,y_center]
-              radius ... best-fit circle radius
-    """
-    x = [pt[0] for pt in xy]
-    y = [pt[1] for pt in xy]
-
-    def _calc_R(xc, yc):
-        """calculate the distance of each 2D points from the center (xc, yc) """
-        return ((x - xc) ** 2 + (y - yc) ** 2) ** 0.5
-
-    def _func(c):
-        """calculate the algebraic distance between the data points and the mean circle centered at c=(xc, yc) """
-        Ri = _calc_R(*c)
-        return Ri - Ri.mean()
-
-    xm = np.mean(x)
-    ym = np.mean(y)
-    center_estimate = xm, ym
-    center, _ = optimize.leastsq(_func, center_estimate)
-    xc, yc = center
-    Ri = _calc_R(*center)
-    R = Ri.mean()
-    xy_ctr = [xc, yc]
-    return xy_ctr, R
-
-
-def angle_between(c, p1, p2):
-    # p1, p2 are points; c is center
-    a = np.array(p1)
-    b = np.array(c)
-    c = np.array(p2)
-    ba = a - b
-    bc = c - b
-    cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
-    angle = np.arccos(cosine_angle)
-    return np.degrees(angle)
-
-
-def get_angle(direction, center, start_point, end_point):
-    # this deals correctly with angles > 180 deg
-    if direction in ['cw']:
-        return calculate_angle_abby(center, start_point, end_point)
-    return calculate_angle_abby(center, end_point, start_point)
-
-
-def calculate_angle(center, a, b):
-    # Calculate angle between two points """
-    ba = np.array(a) - np.array(center)
-    bc = np.array(b) - np.array(center)
-    ang_a = np.arctan2(*ba[::-1])
-    ang_b = np.arctan2(*bc[::-1])
-    return 360 - np.rad2deg((ang_a - ang_b) % (2 * np.pi))
-
-
-def calculate_angle_abby(center, a, b):
-    # calculate angle between 2 points
-    ac = np.array(a) - np.array(center)
-    bc = np.array(b) - np.array(center)
-
-    dot = ac.dot(bc)
-
-    ac_norm = np.sqrt(ac.dot(ac))
-    bc_norm = np.sqrt(bc.dot(bc))
-
-    angle_rad = np.arccos(dot / (ac_norm * bc_norm))
-
-    return np.rad2deg(angle_rad)
-
-
-def get_datetime_string():
-    ts = time.time()
-    st = datetime.datetime.fromtimestamp(ts).strftime('%Y%m%d %H:%M:%S')
-    st = st.split(' ')
-    _date_str = st[0][2:]
-    _time_str = st[1].replace(':', '')
-    return _date_str, _time_str
-
-
-def round2(value):
-    return str(round(float(value), 2))
-
-
-def is_point_inside_box(point, box_bottom_left, box_top_right):
-    # checks if a point (x,y) is inside a box
-    p = point
-    bl = box_bottom_left
-    tr = box_top_right
-
-    if (p[0] > bl[0] and p[0] < tr[0] and p[1] > bl[1] and p[1] < tr[1]):
-        return True
-    return False
-
-
-def reverse_direction(direction):
-    if direction in ['cw']:
-        reverse_direction = 'ccw'
-    elif direction in ['ccw']:
-        reverse_direction = 'cw'
-    else:
-        return 'FAILED: invalid direction'
-    return reverse_direction
-
-
-def get_speed_parameters_cruise(cruise_speed_mode):
-    speed_settings = {}
-    speed_settings['null'] = {'cruise': 0, 'spinup': 0, 'spindown': 0}
-    speed_settings['default'] = {'cruise': 33, 'spinup': 12, 'spindown': 12}
-    speed_settings['speed_3'] = {'cruise': 66, 'spinup': 1, 'spindown': 1}
-    speed_settings['speed_8'] = {'cruise': 99, 'spinup': 1, 'spindown': 1}
-    speed_settings['speed_9'] = {'cruise': 99, 'spinup': 2, 'spindown': 2}
-    speed_settings['speed_12'] = {'cruise': 116, 'spinup': 1, 'spindown': 1}
-    speed_settings['speed_14'] = {'cruise': 84, 'spinup': 1, 'spindown': 1}
-    speed_settings['speed_18'] = {'cruise': 33, 'spinup': 1, 'spindown': 1}
-    speed_settings['speed_122'] = {'cruise': 116, 'spinup': 2, 'spindown': 2}  # 34k rpm with ramp angle 4.023 each
-    speed_settings['speed_123'] = {'cruise': 116, 'spinup': 2, 'spindown': 1}  # 34k rpm with ramp up 4.023, down 2.012
-    speed_settings['speed_124'] = {'cruise': 116, 'spinup': 1, 'spindown': 2}  # 34k rpm with ramp up 2.012, down 4.023
-    speed_settings['speed_20'] = {'cruise': 66, 'spinup': 2, 'spindown': 3}
-    speed_settings['speed_21'] = {'cruise': 62, 'spinup': 2, 'spindown': 3}
-
-    speed_settings['speed_30'] = {'cruise': 82, 'spinup': 1, 'spindown': 2}
-    speed_settings['speed_31'] = {'cruise': 82, 'spinup': 2, 'spindown': 2}
-    speed_settings['speed_32'] = {'cruise': 82, 'spinup': 2, 'spindown': 3}
-
-    speed_mode_list = list(speed_settings.keys())
-    if cruise_speed_mode not in speed_mode_list:
-        return 'FAILED: selected mode not in list'
-
-    for s in speed_mode_list:
-        cruise_speed = speed_settings[s]['cruise']
-        speed_settings[s]['spin_up_angle'] = cruise_speed * (cruise_speed + 1) * speed_settings[s][
-            'spinup'] / 2 / 10 / 337.358433
-        speed_settings[s]['spin_down_angle'] = cruise_speed * (cruise_speed + 1) * speed_settings[s][
-            'spindown'] / 2 / 10 / 337.358433
-        speed_settings[s]['rpm'] = cruise_speed * 300
-    return speed_settings[cruise_speed_mode]
-
-
-def get_speed_parameters_creep(creep_speed_mode):
-    speed_settings = {}
-    speed_settings['null'] = {'period': 0, 'step_size': 0}
-    speed_settings['default'] = {'period': 2, 'step_size': 1}  # 150
-    speed_settings['creep_0'] = {'period': 2, 'step_size': 10}  # 1500
-    speed_settings['creep_1'] = {'period': 1, 'step_size': 11}  # 3000
-    speed_settings['creep_2'] = {'period': 1, 'step_size': 22}
-    speed_settings['creep_3'] = {'period': 1, 'step_size': 33}
-    speed_settings['creep_4'] = {'period': 2, 'step_size': 3}  # 450
-
-    speed_mode_list = list(speed_settings.keys())
-    if creep_speed_mode not in speed_mode_list:
-        return 'FAILED: selected mode not in list'
-
-    for s in speed_mode_list:
-        try:
-            speed_settings[s]['rpm'] = speed_settings[s]['step_size'] * 300 / speed_settings[s]['period']
-        except:
-            speed_settings[s]['rpm'] = 0
-    return speed_settings[creep_speed_mode]
-
-
-def movetime(rpm=9900, angle=360):
-    # for a move: 0.017778 degree / sec / RPM
-    # example:
-    # a 90 deg move at default cruise speed (9900 RPM) takes 90 / (0.017778 * 9900) = 0.51 seconds
-    return angle / (0.017778 * rpm)
-
-
-def distance(a, b):
-    return np.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
 
 
 class MoveMeasure:
@@ -287,10 +103,10 @@ class MoveMeasure:
         self.microns_per_pixel = 0
 
         self.number_of_correction_moves = 3
-        self.center_phi = None  # tupel with (x,y)
+        self.center_phi = None  # tuple with (x,y)
         self.radius_phi = None
-        self.range_limits_phi = {'cw': None,
-                                 'ccw': None}  # list with ((x,y)_start, (x,y)_end); start is the hardstop that is reached when moving ccw
+        # list with ((x,y)_start, (x,y)_end); start is the hardstop that is reached when moving ccw
+        self.range_limits_phi = {'cw': None, 'ccw': None}
         self.range_angle_phi = None  # full range angle in degree; the direction from start to end counts positive
         self.gain_phi_cruise = {'cw': 1., 'ccw': 1.}
         self.gain_phi_creep = {'cw': 1., 'ccw': 1.}
@@ -305,7 +121,7 @@ class MoveMeasure:
         self.fid_window_x = [1330, 1400]
         self.fid_window_y = [1660, 1730]
         self.movement_threshold = 0.1
-        self.positioners = []
+        self.positioners = {}
         self.speed_mode_cruise_phi = 'default'
         self.speed_mode_creep_phi = 'default'
         self.speed_mode_cruise_theta = 'default'
@@ -344,18 +160,17 @@ class MoveMeasure:
             self.camera.set_image_type(2)
 
     def close_camera(self):
-        if self.camera_name in ['sti']:
-            self.camera.close_camera()
-        if self.camera_name in ['zwo']:
-            self.camera.close_camera()
+        # if self.camera_name in ['sti']:
+        #     self.camera.close_camera()
+        # if self.camera_name in ['zwo']:
+        #     self.camera.close_camera()
+        self.camera.close_camera()
 
-    def set_camera_scale(self, microns_per_pixel=131):
+    def set_camera_scale(self, microns_per_pixel=51):
         self.microns_per_pixel = microns_per_pixel
         print('Camera scale: ' + str(microns_per_pixel) + ' microns per pixel')
-        return
 
     def get_camera_scale(self):
-        # self.microns_per_pixel = microns_per_pixel
         print('Camera scale: ' + str(self.microns_per_pixel) + ' microns per pixel')
         return self.microns_per_pixel
 
@@ -364,18 +179,6 @@ class MoveMeasure:
 
     def get_target_distance(self):
         return self.target_distance
-
-    # TODO: remove function?
-    def get_all_centroids(self, camera, nspots=1, fboxsize=7):
-        image = camera.start_exposure()
-        nspots = 1 + len(self.fiducial_reference_centroids)
-        # image = image[imx[0]:imx[1],imy[0]:imy[1]]
-        xCenSub, yCenSub, peaks, FWHMSub, _ = multicens.multiCens(image, n_centroids_to_keep=nspots, verbose=False,
-                                                                  write_fits=False, size_fitbox=fboxsize)
-        print(' get centroids >> ' + str(xCenSub[0]) + ' ' + str(yCenSub[0]))
-        centroids = zip(xCenSub[0:nspots], yCenSub[0:nspots])
-        print('centroids', centroids)
-        return centroids
 
     """Sets a window such that any future calls to get_centroids will only generate a FITS file of the specified
     window, with all coordinates adjusted relative to the window size"""
@@ -405,38 +208,37 @@ class MoveMeasure:
         else:
             return False
 
-    """Given the window where the fiducial centroids are, returns the centroids"""
+    """Given the window where the fiducial centroids are, returns the absolute positions of the centroids"""
 
     def get_fiducial_centroids(self, write_fits_file=False, write_region_file=False, write_conf_file=False
-                               , save_full=False, dir_name=None, nspots=4, fboxsize=7):
+                               , save_full=False, save_dir=None, nspots=4, fboxsize=7):
         image = self.camera.start_exposure()
         crop = image[self.fid_window_y[0]:self.fid_window_y[1], self.fid_window_x[0]:self.fid_window_x[1]]
         date_str, time_str = get_datetime_string()
-        directory = './data'
-        if dir_name:
-            directory = f"./data/{dir_name}"
-        if write_fits_file:
-            # save full FITS file
-            if save_full:
-                outfile = f"{date_str}_{time_str}_full.fits"
-                fits.writeto(outfile, image)
-                shutil.move(outfile, directory)
-            # save cropped FITS file (just the window)
-            outfile = f"{date_str}_{time_str}_crop.fits"
-            fits.writeto(outfile, crop)
-            shutil.move(outfile, directory)
 
         xCenSub, yCenSub, peaks, FWHMSub, _ = multicens.multiCens(crop, n_centroids_to_keep=nspots, verbose=False,
                                                                   write_fits=False, size_fitbox=fboxsize)
+        if not xCenSub:
+            print("No centroids detected")
+            exit(1)
+
+        if write_fits_file:
+            # save full FITS file
+            if save_full:
+                write_fits(image, f"{date_str}_{time_str}_full.fits", save_dir)
+            # save cropped FITS file (just the window)
+            write_fits(crop, f"{date_str}_{time_str}_crop.fits", save_dir)
+
         if write_region_file:
-            outfile = f"{date_str}_{time_str}_crop.reg"
-            f = open(outfile, 'w')
-            f.write('global color=magenta font="helvetica 13 normal"\n')
-            for i in range(len(xCenSub)):
-                text = f"circle {xCenSub[i] + 1} {yCenSub[i] + 1} {FWHMSub[i] / 2}\n"
-                f.write(text)
-            f.close()
-            shutil.move(outfile, directory)
+            write_region(f"{date_str}_{time_str}_crop.reg", save_dir, xCenSub, yCenSub, FWHMSub)
+
+        # convert to absolute positions
+        xCenSub = [x + self.fid_window_x[0] for x in xCenSub]
+        yCenSub = [y + self.fid_window_y[0] for y in yCenSub]
+        centroids = zip(xCenSub, yCenSub)
+
+        if write_region_file and save_full:
+            write_region(f"{date_str}_{time_str}_full.reg", save_dir, xCenSub, yCenSub, FWHMSub)
 
         if write_conf_file:
             config = ConfigObj()
@@ -444,14 +246,14 @@ class MoveMeasure:
             for i in range(len(xCenSub)):
                 key = f"fid_{i}"
                 config[key] = {}
-                config[key]['x_coord'] = xCenSub[i] + self.fid_window_x[0]
-                config[key]['y_coord'] = yCenSub[i] + self.fid_window_y[0]
+                config[key]['x_coord'] = xCenSub[i]
+                config[key]['y_coord'] = yCenSub[i]
                 config[key]['peak'] = peaks[i]
                 config[key]['FWHM'] = FWHMSub[i]
             config.write()
-            shutil.move(config.filename, directory)
+            shutil.move(config.filename, f"./data/{save_dir}")
 
-        return list(zip(xCenSub, yCenSub)), peaks, FWHMSub
+        return list(centroids), peaks, FWHMSub
 
     @staticmethod
     def unpack_fiducial_conf(filename):
@@ -470,17 +272,11 @@ class MoveMeasure:
         dist_1_3 = distance(fiducials[1], fiducials[3])  # should be 2mm
         return np.mean([1200 / dist_0_1, 1600 / dist_0_3, 2000 / dist_1_3])
 
-    """Takes in a list of (x,y) points and computes and returns the standard deviation of those points"""
-
-    @staticmethod
-    def point_spread(points):
-        stds = np.std(points, axis=0)
-        return np.sqrt(stds[0] ** 2 + stds[1] ** 2)
-
     """Takes repeat number of images of the fiducial, computes, returns, and sets class attributes for the fiducial 
     offset and camera scale"""
 
     def calibrate_fiducial(self, win_x, win_y, repeat=1, write_files=False):
+        # TODO: check if fiducial moves between images, if so adjust brightness
         self.set_fiducial_window(win_x, win_y)
         date_str, time_str = get_datetime_string()
         dir_name = f"{date_str}_{time_str}_fiducial_calibration"
@@ -493,7 +289,7 @@ class MoveMeasure:
         camera_scales = []
         for i in range(repeat):
             centroids, peaks, FWHM = self.get_fiducial_centroids(write_files, write_files, write_files,
-                                                                 dir_name=dir_name)
+                                                                 save_dir=dir_name)
             centroids = sorted(centroids, key=lambda x: x[0])
             camera_scales.append(self.camera_scale_from_fiducial(centroids))
             fid_0.append(centroids[0])
@@ -501,9 +297,9 @@ class MoveMeasure:
             fid_2.append(centroids[2])
             fid_3.append(centroids[3])
         # perform sanity check to make sure fiducial does not move between images
-        threshold = 0.1
-        if self.point_spread(fid_0) > threshold or self.point_spread(fid_1) > threshold \
-                or self.point_spread(fid_2) > threshold or self.point_spread(fid_3) > threshold:
+        if point_spread(fid_0) > self.movement_threshold or point_spread(fid_1) > self.movement_threshold \
+                or point_spread(fid_2) > self.movement_threshold \
+                or point_spread(fid_3) > self.movement_threshold:
             print("Fiducials move between images")
             exit(1)
         # set camera scale
@@ -518,7 +314,7 @@ class MoveMeasure:
         self.fiducial_center = [fid_center[0] + win_x[0], fid_center[1] + win_y[0]]
         return self.fiducial_center, self.microns_per_pixel
 
-    """Takes an image and returns the specified number of centroids within that image"""
+    """Takes an image and returns the absolute positions of the specified number of centroids within that image"""
 
     def get_centroids(self, write_fits_file=False, write_region_file=False, write_conf_file=False, nspots=1, fboxsize=7,
                       flip_image=False, save_dir=''):
@@ -532,37 +328,26 @@ class MoveMeasure:
             # remember that in Python it is [y,x]
             image = image[self.window_y[0]:self.window_y[1], self.window_x[0]:self.window_x[1]]
 
+        xCenSub, yCenSub, peaks, FWHMSub, _ = multicens.multiCens(image, n_centroids_to_keep=nspots, verbose=False,
+                                                                  write_fits=False, size_fitbox=fboxsize)
+
+        if not xCenSub:
+            print("No centroids detected")
+            exit(1)
+
         date_str, time_str = get_datetime_string()
         file_name = 'centroids_zwo_' + date_str + '_' + time_str
         if write_fits_file:
-            print('Writing out FITS file')
-            outfile = file_name + '.fits'
-            fits.writeto(outfile, image)
-            # TODO: check if data directory already exists, if not create it
-            shutil.move(outfile, f"./data/{save_dir}")
-
-        xCenSub, yCenSub, peaks, FWHMSub, _ = multicens.multiCens(image, n_centroids_to_keep=nspots, verbose=False,
-                                                                  write_fits=False, size_fitbox=fboxsize)
-        centroids = None
-        if len(xCenSub) > 0:
-            if self.window:
-                xCenSub = [x + self.window_x[0] for x in xCenSub]
-                yCenSub = [y + self.window_y[0] for y in yCenSub]
-            try:
-                centroids = zip(xCenSub, yCenSub)
-            except:
-                print("WARNING: No Centroids!")
+            write_fits(image, f"{file_name}.fits", save_dir)
 
         if write_region_file:
-            print('Writing out region file')
-            outfile = file_name + '.reg'
-            f = open(outfile, 'w')
-            f.write('global color=magenta font="helvetica 13 normal"\n')
-            for i in range(len(xCenSub)):
-                text = f"circle {xCenSub[i] + 1 - self.window_x[0]} {yCenSub[i] + 1 - self.window_y[0]} {FWHMSub[i] / 2}\n"
-                f.write(text)
-            f.close()
-            shutil.move(outfile, f"./data/{save_dir}")
+            write_region(f"{file_name}.reg", save_dir, xCenSub, yCenSub, FWHMSub)
+
+        # convert to absolute positions
+        if self.window:
+            xCenSub = [x + self.window_x[0] for x in xCenSub]
+            yCenSub = [y + self.window_y[0] for y in yCenSub]
+        centroids = zip(xCenSub, yCenSub)
 
         if write_conf_file:
             config = ConfigObj()
@@ -570,33 +355,62 @@ class MoveMeasure:
             for i in range(len(xCenSub)):
                 key = f"centroid_{i}"
                 config[key] = {}
-                config[key]['x_coord'] = xCenSub[i] + self.window_x[0]
-                config[key]['y_coord'] = yCenSub[i] + self.window_y[0]
+                config[key]['x_coord'] = xCenSub[i]
+                config[key]['y_coord'] = yCenSub[i]
                 config[key]['peak'] = peaks[i]
                 config[key]['FWHM'] = FWHMSub[i]
             config.write()
+            if not os.path.isdir(f"./data/{save_dir}"):
+                os.mkdir(f"./data/{save_dir}")
             shutil.move(config.filename, f"./data/{save_dir}")
 
         return list(centroids), peaks, FWHMSub
 
-    """Given a 2 lists of positions of positioners, finds which positioner moved/changed positions"""
+    def check_broadcast(self):
+        points_b, peaks_b, FWHM_b = self.get_centroids(write_fits_file=True, nspots=17, save_dir='test_broadcast')
+        self.fipos.move_direct(None, direction='ccw', motor='phi')
+        points_a, peaks_a, FWHM_a = self.get_centroids(write_fits_file=True, nspots=17, save_dir='test_broadcast')
+        return len(self.find_moved(points_b, points_a)), points_b, points_a
 
-    def find_moved(self, centroids_before, centroids_after):
+    """Given 2 lists of positions of positioners, finds which positioners moved/changed positions"""
+
+    def find_moved(self, centroids_before, centroids_after, threshold=None):
+        if not threshold:
+            threshold = self.movement_threshold
         moved = []
         for after in centroids_after:
             match = False
             for before in centroids_before:
-                if distance(before, after) < self.movement_threshold:
+                if distance(before, after) < threshold:
                     match = True
                     break
             if not match:
                 moved.append(after)
+        return moved
+
+    """Given 2 lists of positioners of positioners, finds which positioners moved/changed positions. Function is used
+    specifically for the positioner matching process, so only one positioner should move. If no positioners move, or if
+    multiple move, or if a fiducial point moves, function raises an error"""
+
+    def find_moved_match(self, centroids_before, centroids_after):
+        # moved = []
+        # for after in centroids_after:
+        #     match = False
+        #     for before in centroids_before:
+        #         if distance(before, after) < self.movement_threshold:
+        #             match = True
+        #             break
+        #     if not match:
+        #         moved.append(after)
+        moved = self.find_moved(centroids_before, centroids_after)
         if len(moved) == 1 and not self.in_fiducial_window((moved[0])):
             return moved
         elif not moved:
             raise MoveNone()
         else:
             raise MoveError(moved)
+
+    """Disambiguates possible errors raised by find_moved_match"""
 
     def move_error_handler(self, moved, pos_conf, pos_number, pos_id):
         if len(moved) == 1 and self.in_fiducial_window(moved[0]):
@@ -619,6 +433,8 @@ class MoveMeasure:
                 print(f"{pos_moved} moved while attempting to move positioner {pos_id}")
                 return pos_number
 
+    """Writes to a config file the positions and CAN ids of positioners"""
+
     @staticmethod
     def set_pos_config(pos_conf, key, pos_number, moved, pos_id):
         pos_conf[key] = {}
@@ -631,8 +447,7 @@ class MoveMeasure:
     positioners"""
 
     def match_positioners(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
-        fp = fiposcontrol.FiposControl(['can0'])
-        can_command_out = fp.get_can_address()
+        can_command_out = self.fipos.get_can_address()
         pos_ids = can_command_out[2]['can0'].keys()
         date_str, time_str = get_datetime_string()
         dir_name = f"{date_str}_{time_str}_positioner_matching"
@@ -650,23 +465,23 @@ class MoveMeasure:
             if pos_id != 10000:
                 # take image and compute centroids after moving
                 to_move = {'can0': {pos_id: pos_id}}
-                fp.move_direct(to_move, 'cw', motor='phi')
+                self.fipos.move_direct(to_move, 'cw', motor='phi')
                 centroids_after, peaks_after, FWHM_after = self.get_centroids(write_fits_file, write_region_file,
                                                                               False, nspots, fboxsize,
                                                                               save_dir=dir_name)
                 try:
-                    moved = self.find_moved(centroids_before, centroids_after)
+                    moved = self.find_moved_match(centroids_before, centroids_after)
                     pos_number = self.set_pos_config(pos_conf, f"positioner_{pos_number}", pos_number, moved, pos_id)
                 except MoveNone:
                     # try moving other direction
                     try:
-                        fp.move_direct(to_move, 'ccw', motor='phi')
+                        self.fipos.move_direct(to_move, 'ccw', motor='phi')
                         print('Tried moving other direction!')
                         centroids_after, peaks_after, FWHM_after = self.get_centroids(write_fits_file,
                                                                                       write_region_file,
                                                                                       False, nspots, fboxsize,
                                                                                       save_dir=dir_name)
-                        moved = self.find_moved(centroids_before, centroids_after)
+                        moved = self.find_moved_match(centroids_before, centroids_after)
                         pos_number = self.set_pos_config(pos_conf, f"positioner_{pos_number}", pos_number, moved,
                                                          pos_id)
                         print("Moved other direction!")
@@ -684,15 +499,14 @@ class MoveMeasure:
     """Set brightness of positioners such that all FWHM < threshold"""
 
     def calibrate_brightness(self, duty=100, threshold=1.7, nspots=1, fboxsize=7):
-        fp = fiposcontrol.FiposControl(['can0'])
         points, peaks, FWHM = self.get_centroids(nspots=nspots, fboxsize=fboxsize)
         while FWHM[0] > threshold:
             duty = duty / 2
-            fp.set_fiducial_duty(duty=duty)
+            self.fipos.set_fiducial_duty(duty=duty)
             points, peaks, FWHM = self.get_centroids(nspots=nspots, fboxsize=fboxsize)
 
     @staticmethod
-    def unpack_conf(filename):
+    def unpack_pos_conf(filename):
         config = ConfigObj(filename)
         x = []
         y = []
@@ -702,6 +516,9 @@ class MoveMeasure:
             y.append(float(centroid['y_coord']))
             can_ids.append(centroid['can_id'])
         return x, y, can_ids
+
+    """Given a list of points of the form (x, y) or (x, y, bus_id), returns a dictionary of those items keyed by page 
+    id"""
 
     @staticmethod
     def page_label(points):
@@ -715,34 +532,36 @@ class MoveMeasure:
         split.append(points[prev:])
         for i in range(len(split)):
             split[i] = sorted(split[i], key=lambda x: x[0])
-        labeled = []
+        labeled = {}
         counter = 0
         for row in split:
             for point in row:
-                labeled.append(point + [counter])
+                labeled[counter] = list(point)
                 counter = counter + 1
         return labeled
 
     def init_positioners(self, init_filename):
-        X, Y, ids = self.unpack_conf(init_filename)
+        X, Y, ids = self.unpack_pos_conf(init_filename)
         points = list(zip(X, Y, ids))
         labeled = self.page_label(points)
-        for point in labeled:
+        for page_id, point in labeled.items():
             pos = positioner.Positioner()
             pos.current_position = [point[0], point[1]]
             pos.bus_id = point[2]
-            pos.page_id = point[3]
+            pos.page_id = page_id
             pos.set_window()
-            self.positioners.append(pos)
+            self.positioners[page_id] = pos
+
+    def find_hardstop_phi(self):
+        pass
 
     def calibrate_phi(self):
         pass
 
     def calibrate_single_phi(self):
-        fp = fiposcontrol.FiposControl(['can0'])
         # reset to hardstop
         to_move = {'can0': {5256: 5256}}
-        fp.move_direct(to_move, motor='phi', angle=200)
+        self.fipos.move_direct(to_move, motor='phi', angle=200)
         # make sure to set window
         self.set_window('crop', [600, 650], [995, 1045])
         positions = []
@@ -750,7 +569,7 @@ class MoveMeasure:
         centroid, peak, FWHM = self.get_centroids(write_fits_file=True, save_dir='single_calibration')
         positions.append(centroid)
         for i in range(18):
-            fp.move_direct(to_move, direction='ccw', motor='phi', angle=10)
+            self.fipos.move_direct(to_move, direction='ccw', motor='phi', angle=10)
             centroid, peak, FWHM = self.get_centroids(write_fits_file=True, save_dir='single_calibration')
             positions.append(centroid)
             x_lower = int(centroid[0][0] - 25)
@@ -760,26 +579,23 @@ class MoveMeasure:
             self.set_window('crop', [x_lower, x_upper], [y_lower, y_upper])
         return positions
 
-    @staticmethod
-    def rough_moved(centroids_before, centroids_after):
-        moved = []
-        for after in centroids_after:
-            match = False
-            for before in centroids_before:
-                if distance(before, after) < 1:
-                    match = True
-                    break
-            if not match:
-                moved.append(after)
-        return moved
-
     def rough_find_hardstop_phi(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
-        fp = fiposcontrol.FiposControl(['can0'])
-        fp.move_direct(None, angle=200, motor='phi')
-        points_b, peaks_b, FWHM_b = self.get_centroids(write_fits_file, write_region_file, False, nspots, fboxsize)
-        fp.move_direct(None, angle=200, motor='phi')
-        points_a, peaks_a, FWHM_a = self.get_centroids(write_fits_file, write_region_file, False, nspots, fboxsize)
-        return self.rough_moved(points_b, points_a), points_a
+        # self.fipos.move_direct(None, angle=200, motor='phi')
+        # self.fipos.move_direct(None, speed='creep', angle=3, motor='phi')
+        # points_b, peaks_b, FWHM_b = self.get_centroids(write_fits_file, write_region_file, False, nspots, fboxsize)
+        # self.fipos.move_direct(None, speed='creep', angle=3, motor='phi')
+        # points_a, peaks_a, FWHM_a = self.get_centroids(write_fits_file, write_region_file, False, nspots, fboxsize)
+        # return self.find_moved(points_b, points_a, 1), points_a
+        points = []
+        all_points, peaks, FWHM = self.get_centroids(write_fits_file, write_region_file, False, nspots, fboxsize)
+        for point in all_points:
+            if not self.in_fiducial_window(point):
+                points.append(point)
+        labeled_points = self.page_label(points)
+        for page_id, point in labeled_points.items():
+            self.positioners[page_id].phi_hardstop = point
+            self.positioners[page_id].current_phi = 0
+            self.positioners[page_id].current_position = point
 
     def get_pos_centroids(self, centroids):
         # image = camera.start_exposure()
@@ -1341,7 +1157,7 @@ class MoveMeasure:
     #                 cal_measured += 1
     #             if cal_measured > 1:
     #                 self.arc_calibration_available_phi = True
-    #
+    # 
     #             range_measured = 0
     #             if 'range_limits_phi' in cal_data:
     #                 self.range_limits_phi = (ast.literal_eval(cal_data['range_limits_phi'][0]),
@@ -1352,7 +1168,7 @@ class MoveMeasure:
     #                 range_measured += 1
     #             if range_measured > 1:
     #                 self.range_calibration_available_phi = True
-    #
+    # 
     #     if not self.arc_calibration_available_phi or not use_stored_if_available:
     #         center, radius, calibration_centroids, cali_angles = self.calibrate_arc_phi()
     #         print(' arc calibration ')
@@ -1372,7 +1188,7 @@ class MoveMeasure:
     #         cal_data['range_limits_phi'] = self.range_limits_phi
     #         cal_data['range_angle_phi'] = self.range_angle_phi
     #         write_conf_file = True
-    #
+    # 
     #     if write_conf_file:
     #         cal_data.filename = calfile
     #         cal_data.write()
