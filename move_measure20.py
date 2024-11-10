@@ -181,11 +181,11 @@ class MoveMeasure:
         return self.target_distance
 
     """Sets a window such that any future calls to get_centroids will only generate a FITS file of the specified
-    window, with all coordinates adjusted relative to the window size"""
+    window"""
 
     # TODO: need to reset window mode between images!!!
-    def set_window(self, mode='Full', win_x=None, win_y=None):
-        if mode.lower() in ['full'] or not win_x or not win_y:
+    def set_window(self, mode='full', win_x=None, win_y=None):
+        if mode == 'full' or not win_x or not win_y:
             self.window = False
             print('Window mode off')
         else:
@@ -193,6 +193,62 @@ class MoveMeasure:
             self.window_x[0], self.window_x[1] = win_x
             self.window_y[0], self.window_y[1] = win_y
             print('Window mode on: x_win: ' + str(self.window_x) + '  y_win: ' + str(self.window_y))
+
+    """Takes an image and returns the absolute positions of the specified number of centroids within that image"""
+
+    def get_centroids(self, write_fits_file=False, write_region_file=False, write_conf_file=False, nspots=1, fboxsize=7,
+                      flip_image=False, save_dir=''):
+        image = self.camera.start_exposure()
+        if flip_image:
+            # horizontal flip (left-right)
+            image = image[:, :: -1]
+            # vertical flip
+            # image = image[: : -1]
+        if self.window:
+            # remember that in Python it is [y,x]
+            image = image[self.window_y[0]:self.window_y[1], self.window_x[0]:self.window_x[1]]
+
+        xCenSub, yCenSub, peaks, FWHMSub, _ = multicens.multiCens(image, n_centroids_to_keep=nspots, verbose=False,
+                                                                  write_fits=False, size_fitbox=fboxsize)
+
+        if not xCenSub:
+            print("No centroids detected")
+            exit(1)
+
+        date_str, time_str = get_datetime_string()
+        file_name = 'centroids_' + date_str + '_' + time_str
+        if write_fits_file:
+            write_fits(image, f"{file_name}.fits", save_dir)
+
+        if write_region_file:
+            write_region(f"{file_name}.reg", save_dir, xCenSub, yCenSub, FWHMSub)
+
+        # convert to absolute positions
+        if self.window:
+            xCenSub = [x + self.window_x[0] for x in xCenSub]
+            yCenSub = [y + self.window_y[0] for y in yCenSub]
+        centroids = listify(zip(xCenSub, yCenSub))
+        labeled = self.page_label(listify(zip(xCenSub, yCenSub, peaks, FWHMSub)))
+
+        if write_conf_file:
+            config = ConfigObj()
+            config.filename = f"{file_name}.conf"
+            for i, point in labeled.items():
+                key = f"centroid_{i}"
+                config[key] = {}
+                config[key]['x_coord'] = point[0]
+                config[key]['y_coord'] = point[1]
+                config[key]['peak'] = point[2]
+                config[key]['FWHM'] = point[3]
+            config.write()
+            if not os.path.isdir(f"./data/{save_dir}"):
+                os.mkdir(f"./data/{save_dir}")
+            shutil.move(config.filename, f"./data/{save_dir}")
+
+        # reset window
+        self.set_window()
+
+        return centroids, peaks, FWHMSub
 
     """Sets class attributes for the bounds of the window where the fiducial is"""
 
@@ -210,50 +266,34 @@ class MoveMeasure:
 
     """Given the window where the fiducial centroids are, returns the absolute positions of the centroids"""
 
-    def get_fiducial_centroids(self, write_fits_file=False, write_region_file=False, write_conf_file=False
-                               , save_full=False, save_dir=None, nspots=4, fboxsize=7):
-        image = self.camera.start_exposure()
-        crop = image[self.fid_window_y[0]:self.fid_window_y[1], self.fid_window_x[0]:self.fid_window_x[1]]
+    def get_fiducial_centroids(self, write_fits_file=False, write_region_file=False, write_conf_file=False,
+                               save_dir=None, nspots=4, fboxsize=7):
+
+        self.set_window(mode='fid', win_x=self.fid_window_x, win_y=self.fid_window_y)
+        centroids, peaks, FWHM = self.get_centroids(write_fits_file, write_region_file, write_conf_file=False,
+                                                    nspots=nspots, fboxsize=fboxsize, flip_image=False,
+                                                    save_dir=save_dir)
+
         date_str, time_str = get_datetime_string()
-
-        xCenSub, yCenSub, peaks, FWHMSub, _ = multicens.multiCens(crop, n_centroids_to_keep=nspots, verbose=False,
-                                                                  write_fits=False, size_fitbox=fboxsize)
-        if not xCenSub:
-            print("No centroids detected")
-            exit(1)
-
-        if write_fits_file:
-            # save full FITS file
-            if save_full:
-                write_fits(image, f"{date_str}_{time_str}_full.fits", save_dir)
-            # save cropped FITS file (just the window)
-            write_fits(crop, f"{date_str}_{time_str}_crop.fits", save_dir)
-
-        if write_region_file:
-            write_region(f"{date_str}_{time_str}_crop.reg", save_dir, xCenSub, yCenSub, FWHMSub)
-
-        # convert to absolute positions
-        xCenSub = [x + self.fid_window_x[0] for x in xCenSub]
-        yCenSub = [y + self.fid_window_y[0] for y in yCenSub]
-        centroids = zip(xCenSub, yCenSub)
-
-        if write_region_file and save_full:
-            write_region(f"{date_str}_{time_str}_full.reg", save_dir, xCenSub, yCenSub, FWHMSub)
-
+        unzipped_centroids = [list(t) for t in zip(*centroids)]
+        # sort fiducial points left to right
+        ordered = sorted(listify(zip(unzipped_centroids[0], unzipped_centroids[1], peaks, FWHM)), key=lambda x: x[0])
         if write_conf_file:
             config = ConfigObj()
             config.filename = f"{date_str}_{time_str}_fiducials.conf"
-            for i in range(len(xCenSub)):
-                key = f"fid_{i}"
+            for i, point in enumerate(ordered):
+                key = f"fiducial_{i}"
                 config[key] = {}
-                config[key]['x_coord'] = xCenSub[i]
-                config[key]['y_coord'] = yCenSub[i]
-                config[key]['peak'] = peaks[i]
-                config[key]['FWHM'] = FWHMSub[i]
+                config[key]['x_coord'] = point[0]
+                config[key]['y_coord'] = point[1]
+                config[key]['peak'] = point[2]
+                config[key]['FWHM'] = point[3]
             config.write()
+            if not os.path.isdir(f"./data/{save_dir}"):
+                os.mkdir(f"./data/{save_dir}")
             shutil.move(config.filename, f"./data/{save_dir}")
 
-        return list(centroids), peaks, FWHMSub
+        return centroids, peaks, FWHM
 
     @staticmethod
     def unpack_fiducial_conf(filename):
@@ -263,14 +303,24 @@ class MoveMeasure:
             fid_list.append([float(fid['x_coord']), float(fid['y_coord'])])
         return sorted(fid_list, key=lambda x: x[0])
 
-    """Takes in list of centroid coordinates of a fiducial and computes the microns to pixel ratio"""
-
+    """Takes in list of centroid coordinates of a fiducial and computes the microns to pixel ratio. Assumes fiducials
+    are ordered from left to right"""
+    # TODO: add code to take in rotational orientation of fiducials
     @staticmethod
     def camera_scale_from_fiducial(fiducials):
         dist_0_1 = distance(fiducials[0], fiducials[1])  # should be 1.2mm
         dist_0_3 = distance(fiducials[0], fiducials[3])  # should be 1.6mm
         dist_1_3 = distance(fiducials[1], fiducials[3])  # should be 2mm
         return np.mean([1200 / dist_0_1, 1600 / dist_0_3, 2000 / dist_1_3])
+
+    """Lowers the brightness of centroids until FWHM of all centroids is < threshold"""
+
+    def calibrate_brightness(self, duty=100, threshold=1.7, nspots=1, fboxsize=7):
+        points, peaks, FWHM = self.get_centroids(nspots=nspots, fboxsize=fboxsize)
+        while FWHM[0] > threshold:
+            duty = duty / 2
+            self.fipos.set_fiducial_duty(duty=duty)
+            points, peaks, FWHM = self.get_centroids(nspots=nspots, fboxsize=fboxsize)
 
     """Takes repeat number of images of the fiducial, computes, returns, and sets class attributes for the fiducial 
     offset and camera scale"""
@@ -311,60 +361,8 @@ class MoveMeasure:
         fid_3_center = np.mean(fid_3, axis=0)
         fid_centers = [fid_0_center, fid_1_center, fid_2_center, fid_3_center]
         fid_center = np.mean(fid_centers, axis=0)
-        self.fiducial_center = [fid_center[0] + win_x[0], fid_center[1] + win_y[0]]
+        self.fiducial_center = [fid_center[0], fid_center[1]]
         return self.fiducial_center, self.microns_per_pixel
-
-    """Takes an image and returns the absolute positions of the specified number of centroids within that image"""
-
-    def get_centroids(self, write_fits_file=False, write_region_file=False, write_conf_file=False, nspots=1, fboxsize=7,
-                      flip_image=False, save_dir=''):
-        image = self.camera.start_exposure()
-        if flip_image:
-            # horizontal flip (left-right)
-            image = image[:, :: -1]
-            # vertical flip
-            # image = image[: : -1]
-        if self.window:
-            # remember that in Python it is [y,x]
-            image = image[self.window_y[0]:self.window_y[1], self.window_x[0]:self.window_x[1]]
-
-        xCenSub, yCenSub, peaks, FWHMSub, _ = multicens.multiCens(image, n_centroids_to_keep=nspots, verbose=False,
-                                                                  write_fits=False, size_fitbox=fboxsize)
-
-        if not xCenSub:
-            print("No centroids detected")
-            exit(1)
-
-        date_str, time_str = get_datetime_string()
-        file_name = 'centroids_zwo_' + date_str + '_' + time_str
-        if write_fits_file:
-            write_fits(image, f"{file_name}.fits", save_dir)
-
-        if write_region_file:
-            write_region(f"{file_name}.reg", save_dir, xCenSub, yCenSub, FWHMSub)
-
-        # convert to absolute positions
-        if self.window:
-            xCenSub = [x + self.window_x[0] for x in xCenSub]
-            yCenSub = [y + self.window_y[0] for y in yCenSub]
-        centroids = zip(xCenSub, yCenSub)
-
-        if write_conf_file:
-            config = ConfigObj()
-            config.filename = f"{file_name}.conf"
-            for i in range(len(xCenSub)):
-                key = f"centroid_{i}"
-                config[key] = {}
-                config[key]['x_coord'] = xCenSub[i]
-                config[key]['y_coord'] = yCenSub[i]
-                config[key]['peak'] = peaks[i]
-                config[key]['FWHM'] = FWHMSub[i]
-            config.write()
-            if not os.path.isdir(f"./data/{save_dir}"):
-                os.mkdir(f"./data/{save_dir}")
-            shutil.move(config.filename, f"./data/{save_dir}")
-
-        return list(centroids), peaks, FWHMSub
 
     def check_broadcast(self):
         points_b, peaks_b, FWHM_b = self.get_centroids(write_fits_file=True, nspots=17, save_dir='test_broadcast')
@@ -393,15 +391,6 @@ class MoveMeasure:
     multiple move, or if a fiducial point moves, function raises an error"""
 
     def find_moved_match(self, centroids_before, centroids_after):
-        # moved = []
-        # for after in centroids_after:
-        #     match = False
-        #     for before in centroids_before:
-        #         if distance(before, after) < self.movement_threshold:
-        #             match = True
-        #             break
-        #     if not match:
-        #         moved.append(after)
         moved = self.find_moved(centroids_before, centroids_after)
         if len(moved) == 1 and not self.in_fiducial_window((moved[0])):
             return moved
@@ -498,13 +487,6 @@ class MoveMeasure:
 
     """Set brightness of positioners such that all FWHM < threshold"""
 
-    def calibrate_brightness(self, duty=100, threshold=1.7, nspots=1, fboxsize=7):
-        points, peaks, FWHM = self.get_centroids(nspots=nspots, fboxsize=fboxsize)
-        while FWHM[0] > threshold:
-            duty = duty / 2
-            self.fipos.set_fiducial_duty(duty=duty)
-            points, peaks, FWHM = self.get_centroids(nspots=nspots, fboxsize=fboxsize)
-
     @staticmethod
     def unpack_pos_conf(filename):
         config = ConfigObj(filename)
@@ -517,16 +499,16 @@ class MoveMeasure:
             can_ids.append(centroid['can_id'])
         return x, y, can_ids
 
-    """Given a list of points of the form (x, y) or (x, y, bus_id), returns a dictionary of those items keyed by page 
-    id"""
+    """Given a list of points of the form [x, y, ...] or [x, y, bus_id], returns a dictionary of those items keyed by 
+    page id or bus id"""
 
     @staticmethod
-    def page_label(points):
+    def page_label(points, key='page_id', row_separation=100):
         points = sorted(points, key=lambda x: x[1], reverse=True)
         split = []
         prev = 0
         for i in range(len(points) - 1):
-            if abs(points[i][1] - points[i + 1][1]) > 100:
+            if abs(points[i][1] - points[i + 1][1]) > row_separation:
                 split.append(points[prev:i + 1])
                 prev = i + 1
         split.append(points[prev:])
@@ -536,13 +518,16 @@ class MoveMeasure:
         counter = 0
         for row in split:
             for point in row:
-                labeled[counter] = list(point)
+                if key == 'page_id':
+                    labeled[counter] = point
+                if key == 'bus_id':
+                    labeled[point[2]] = point
                 counter = counter + 1
         return labeled
 
     def init_positioners(self, init_filename):
         X, Y, ids = self.unpack_pos_conf(init_filename)
-        points = list(zip(X, Y, ids))
+        points = listify(zip(X, Y, ids))
         labeled = self.page_label(points)
         for page_id, point in labeled.items():
             pos = positioner.Positioner()
@@ -552,10 +537,10 @@ class MoveMeasure:
             pos.set_window()
             self.positioners[page_id] = pos
 
-    def find_hardstop_phi(self):
+    def find_hardstop_phi(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
         pass
 
-    def calibrate_phi(self):
+    def calibrate_phi(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
         pass
 
     def calibrate_single_phi(self):
@@ -1157,7 +1142,7 @@ class MoveMeasure:
     #                 cal_measured += 1
     #             if cal_measured > 1:
     #                 self.arc_calibration_available_phi = True
-    # 
+    #
     #             range_measured = 0
     #             if 'range_limits_phi' in cal_data:
     #                 self.range_limits_phi = (ast.literal_eval(cal_data['range_limits_phi'][0]),
@@ -1168,7 +1153,7 @@ class MoveMeasure:
     #                 range_measured += 1
     #             if range_measured > 1:
     #                 self.range_calibration_available_phi = True
-    # 
+    #
     #     if not self.arc_calibration_available_phi or not use_stored_if_available:
     #         center, radius, calibration_centroids, cali_angles = self.calibrate_arc_phi()
     #         print(' arc calibration ')
@@ -1188,7 +1173,7 @@ class MoveMeasure:
     #         cal_data['range_limits_phi'] = self.range_limits_phi
     #         cal_data['range_angle_phi'] = self.range_angle_phi
     #         write_conf_file = True
-    # 
+    #
     #     if write_conf_file:
     #         cal_data.filename = calfile
     #         cal_data.write()

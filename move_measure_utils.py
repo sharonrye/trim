@@ -185,3 +185,10 @@ def write_region(filename, save_dir, xCenSub, yCenSub, FWHMSub):
     if not os.path.isdir(f"./data/{save_dir}"):
         os.mkdir(f"./data/{save_dir}")
     shutil.move(filename, f"./data/{save_dir}")
+
+
+def listify(zip_obj):
+    list_obj = []
+    for obj in zip_obj:
+        list_obj.append(list(obj))
+    return list_obj
