@@ -87,7 +87,7 @@ from move_measure_utils import *
 
 VERSION = '0.1'
 
-
+# TODO: make class object for write_files values
 class MoveMeasure:
     def __init__(self, dev_by_bus=None, camera_name='ST8300', verbose=False, debug_level=0):
         self.verbose = verbose
@@ -101,6 +101,8 @@ class MoveMeasure:
         self.range_calibration_available_phi = False
         self.range_calibration_available_theta = False
         self.microns_per_pixel = 0
+        self.nspots = 17
+        self.current_duty = 100
 
         self.number_of_correction_moves = 3
         self.center_phi = None  # tuple with (x,y)
@@ -122,6 +124,7 @@ class MoveMeasure:
         self.fid_window_y = [1660, 1730]
         self.movement_threshold = 0.1
         self.positioners = {}
+        self.page_to_bus = {}
         self.speed_mode_cruise_phi = 'default'
         self.speed_mode_creep_phi = 'default'
         self.speed_mode_cruise_theta = 'default'
@@ -305,6 +308,7 @@ class MoveMeasure:
 
     """Takes in list of centroid coordinates of a fiducial and computes the microns to pixel ratio. Assumes fiducials
     are ordered from left to right"""
+
     # TODO: add code to take in rotational orientation of fiducials
     @staticmethod
     def camera_scale_from_fiducial(fiducials):
@@ -321,6 +325,7 @@ class MoveMeasure:
             duty = duty / 2
             self.fipos.set_fiducial_duty(duty=duty)
             points, peaks, FWHM = self.get_centroids(nspots=nspots, fboxsize=fboxsize)
+        self.current_duty = duty
 
     """Takes repeat number of images of the fiducial, computes, returns, and sets class attributes for the fiducial 
     offset and camera scale"""
@@ -435,6 +440,7 @@ class MoveMeasure:
     """Matches CAN addresses with positioners, create a conf file with all the positioners and their current 
     positioners"""
 
+    # TODO: have this function init positioners
     def match_positioners(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
         can_command_out = self.fipos.get_can_address()
         pos_ids = can_command_out[2]['can0'].keys()
@@ -485,8 +491,6 @@ class MoveMeasure:
         shutil.move(pos_conf.filename, f"./data/{dir_name}")
         return dir_name
 
-    """Set brightness of positioners such that all FWHM < threshold"""
-
     @staticmethod
     def unpack_pos_conf(filename):
         config = ConfigObj(filename)
@@ -496,7 +500,7 @@ class MoveMeasure:
         for centroid in config.values():
             x.append(float(centroid['x_coord']))
             y.append(float(centroid['y_coord']))
-            can_ids.append(centroid['can_id'])
+            can_ids.append(int(centroid['can_id']))
         return x, y, can_ids
 
     """Given a list of points of the form [x, y, ...] or [x, y, bus_id], returns a dictionary of those items keyed by 
@@ -535,13 +539,49 @@ class MoveMeasure:
             pos.bus_id = point[2]
             pos.page_id = page_id
             pos.set_window()
-            self.positioners[page_id] = pos
+            self.positioners[point[2]] = pos
+            self.page_to_bus[page_id] = point[2]
 
     def find_hardstop_phi(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
         pass
 
+    def remove_fiducial_centroids(self, centroids):
+        positioner_centroids = []
+        for centroid in centroids:
+            if self.fid_window_x[0] < centroid[0] < self.fid_window_y[1] and \
+                    self.fid_window_y[0] < centroid[1] < self.fid_window_y[1]:
+                pass
+            else:
+                positioner_centroids.append(centroid)
+        return positioner_centroids
+
     def calibrate_phi(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
-        pass
+        date_str, time_str = get_datetime_string()
+        dir_name = f"{date_str}_{time_str}_phi_calibration"
+        # quick reset to hardstop
+        self.fipos.move_direct(None, motor='phi', angle=200, direction='cw')
+        # take initial image
+        centroids, peak, FWHM = self.get_centroids(write_fits_file=True, save_dir=dir_name, nspots=17)
+        centroids = self.remove_fiducial_centroids(centroids)
+        page_id_to_position = self.page_label(centroids)
+        for page_id, position in page_id_to_position.items():
+            bus_id = self.page_to_bus[page_id]
+            self.positioners[bus_id].current_position = position
+            # self.positioners[bus_id].phi_calib_positions.append(position)
+
+        for i in range(17):
+            self.fipos.move_direct(None, direction='ccw', motor='phi', angle=10)
+            centroids, peak, FWHM = self.get_centroids(write_fits_file=True, save_dir=dir_name, nspots=17)
+            centroids = self.remove_fiducial_centroids(centroids)
+            page_id_to_position = self.page_label(centroids)
+            for page_id, position in page_id_to_position.items():
+                bus_id = self.page_to_bus[page_id]
+                self.positioners[bus_id].current_position = position
+                self.positioners[bus_id].phi_calib_positions.append(position)
+                self.positioners[bus_id].previous_postions.append(position)
+
+        for positioner in self.positioners.values():
+            positioner.compute_phi_arm_params(self.microns_per_pixel)
 
     def calibrate_single_phi(self):
         # reset to hardstop
@@ -564,6 +604,9 @@ class MoveMeasure:
             self.set_window('crop', [x_lower, x_upper], [y_lower, y_upper])
         return positions
 
+    def calibrate_theta(self, write_fits_file=False, write_region_file=False, fboxsize=7):
+        pass
+
     def rough_find_hardstop_phi(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
         # self.fipos.move_direct(None, angle=200, motor='phi')
         # self.fipos.move_direct(None, speed='creep', angle=3, motor='phi')
@@ -581,26 +624,6 @@ class MoveMeasure:
             self.positioners[page_id].phi_hardstop = point
             self.positioners[page_id].current_phi = 0
             self.positioners[page_id].current_position = point
-
-    def get_pos_centroids(self, centroids):
-        # image = camera.start_exposure()
-        # nspots = 1 + len(self.fiducial_reference_centroids)
-        # image = image[imx[0]:imx[1],imy[0]:imy[1]]
-        # xCenSub, yCenSub, peaks, FWHMSub, _ = multicens.multiCens(image, n_centroids_to_keep=nspots, verbose=False, write_fits=False, size_fitbox=fboxsize)
-        # del peaks
-        # del FWHMSub
-        # print(xCenSub)
-        # print(yCenSub)
-        # print(' get centroids >> ' + str(xCenSub[0]) + ' ' + str(yCenSub[0]))
-        # centroids = zip(xCenSub[0:nspots], yCenSub[0:nspots])
-
-        # now split into fid centroids and pos centroids
-        #
-
-        # now correct the positioner centroid(s)
-        # correction is based on the fiducial_reference_centroids
-
-        return centroids
 
     """Reads in data from config file about location of fiducial centroids if it exists"""
 

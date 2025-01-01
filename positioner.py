@@ -1,5 +1,7 @@
 import numpy as np
 from circle_fit import standardLSQ
+from configobj import ConfigObj
+from move_measure_utils import *
 
 
 class Positioner:
@@ -18,6 +20,8 @@ class Positioner:
         self.phi_hardstop = [-1, -1]
         self.theta_max = -1
         self.phi_max = -1
+        self.phi_error = -1
+        self.theta_error = -1
         self.previous_positions = []
         self.theta_calib_positions = []
         self.phi_calib_positions = []
@@ -32,8 +36,18 @@ class Positioner:
         self.window_x = [x_lower, x_upper]
         self.window_y = [y_lower, y_upper]
 
-    def compute_phi_arm_params(self):
+    def compute_phi_arm_params(self, microns_per_pixel=1):
         x, y, r, s = standardLSQ(self.phi_calib_positions)
         self.phi_center = [x, y]
-        self.phi_arm_length = r
-        return s
+        self.phi_arm_length = r * microns_per_pixel
+        self.phi_error = s * microns_per_pixel
+
+    # TODO write to disk function
+    def write_to_conf(self, dir_name):
+        date_str, time_str = get_datetime_string()
+        dir_name = f"{date_str}_{time_str}_positioner_log"
+        file_name = f"{date_str}_{time_str}_positioner.conf"
+        conf = ConfigObj()
+        conf[self.page_id] = {}
+        for attribute, value in vars(self).items():
+            conf[self.page_id][attribute] = value
