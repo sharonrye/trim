@@ -16,6 +16,26 @@ class MoveError(Exception):
         self.moved = moved
 
 
+class WriteFlags:
+    def __init__(self, write_fits_file=False, write_region_file=False, write_conf_file=False):
+        self.write_fits_file = write_fits_file
+        self.write_region_file = write_region_file
+        self.write_conf_file = write_conf_file
+
+    def any(self):
+        return self.write_fits_file or self.write_region_file or self.write_conf_file
+
+    def all_on(self):
+        self.write_fits_file = True
+        self.write_region_file = True
+        self.write_conf_file = True
+
+    def all_off(self):
+        self.write_fits_file = False
+        self.write_region_file = False
+        self.write_conf_file = False
+
+
 def angle_between(c, p1, p2):
     # p1, p2 are points; c is center
     a = np.array(p1)

@@ -42,6 +42,12 @@ class Positioner:
         self.phi_arm_length = r * microns_per_pixel
         self.phi_error = s * microns_per_pixel
 
+    def compute_theta_arm_params(self, microns_per_pixel=1):
+        x, y, r, s = standardLSQ(self.theta_calib_positions)
+        self.theta_center = [x, y]
+        self.theta_arm_length = distance([x, y], [self.phi_center[0], self.phi_center[1]]) * microns_per_pixel
+        self.theta_error = s * microns_per_pixel
+
     # TODO write to disk function
     def write_to_conf(self, dir_name):
         date_str, time_str = get_datetime_string()

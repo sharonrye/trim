@@ -87,8 +87,10 @@ from move_measure_utils import *
 
 VERSION = '0.1'
 
+
 # TODO: make class object for write_files values
 class MoveMeasure:
+    # TODO: pass in arguments for fiducial window and number of spots
     def __init__(self, dev_by_bus=None, camera_name='ST8300', verbose=False, debug_level=0):
         self.verbose = verbose
         self.camera_name = camera_name
@@ -120,8 +122,8 @@ class MoveMeasure:
         # window values have been set based on the full image size of the ST8300 camera
         self.window_x = [0, 3352]
         self.window_y = [0, 2532]
-        self.fid_window_x = [1330, 1400]
-        self.fid_window_y = [1660, 1730]
+        self.fid_window_x = [1350, 1410]
+        self.fid_window_y = [1320, 1380]
         self.movement_threshold = 0.1
         self.positioners = {}
         self.page_to_bus = {}
@@ -139,6 +141,7 @@ class MoveMeasure:
         self.fiducial_center = [0, 0]
         self.fiducial_search_radius = 3  # we look inside a circle of this size around the fiducial centroid
         self.init_camera()
+        self.flags = WriteFlags(True, True, True)
         # self.set_speed_mode_creep(speed_mode_creep_phi='default', speed_mode_creep_theta='default')
         # self.set_speed_mode_cruise(speed_mode_cruise_phi='default', speed_mode_cruise_theta='default')
 
@@ -199,8 +202,7 @@ class MoveMeasure:
 
     """Takes an image and returns the absolute positions of the specified number of centroids within that image"""
 
-    def get_centroids(self, write_fits_file=False, write_region_file=False, write_conf_file=False, nspots=1, fboxsize=7,
-                      flip_image=False, save_dir=''):
+    def get_centroids(self, nspots=1, fboxsize=7, flip_image=False, save_dir='', flags=None):
         image = self.camera.start_exposure()
         if flip_image:
             # horizontal flip (left-right)
@@ -220,10 +222,14 @@ class MoveMeasure:
 
         date_str, time_str = get_datetime_string()
         file_name = 'centroids_' + date_str + '_' + time_str
-        if write_fits_file:
+        # if no flag argument was passed in, use default
+        if not flags:
+            flags = self.flags
+
+        if flags.write_fits_file:
             write_fits(image, f"{file_name}.fits", save_dir)
 
-        if write_region_file:
+        if flags.write_region_file:
             write_region(f"{file_name}.reg", save_dir, xCenSub, yCenSub, FWHMSub)
 
         # convert to absolute positions
@@ -233,7 +239,7 @@ class MoveMeasure:
         centroids = listify(zip(xCenSub, yCenSub))
         labeled = self.page_label(listify(zip(xCenSub, yCenSub, peaks, FWHMSub)))
 
-        if write_conf_file:
+        if flags.write_conf_file:
             config = ConfigObj()
             config.filename = f"{file_name}.conf"
             for i, point in labeled.items():
@@ -269,53 +275,52 @@ class MoveMeasure:
 
     """Given the window where the fiducial centroids are, returns the absolute positions of the centroids"""
 
-    def get_fiducial_centroids(self, write_fits_file=False, write_region_file=False, write_conf_file=False,
-                               save_dir=None, nspots=4, fboxsize=7):
+    def get_fiducial_centroids(self, save_dir=None, nspots=4, fboxsize=7):
 
         self.set_window(mode='fid', win_x=self.fid_window_x, win_y=self.fid_window_y)
-        centroids, peaks, FWHM = self.get_centroids(write_fits_file, write_region_file, write_conf_file=False,
-                                                    nspots=nspots, fboxsize=fboxsize, flip_image=False,
-                                                    save_dir=save_dir)
+        centroids, peaks, FWHM = self.get_centroids(nspots=nspots, fboxsize=fboxsize, flip_image=False,
+                                                    save_dir=save_dir, flags=WriteFlags(self.flags.write_fits_file,
+                                                                                        self.flags.write_region_file,
+                                                                                        False))
 
-        date_str, time_str = get_datetime_string()
-        unzipped_centroids = [list(t) for t in zip(*centroids)]
-        # sort fiducial points left to right
-        ordered = sorted(listify(zip(unzipped_centroids[0], unzipped_centroids[1], peaks, FWHM)), key=lambda x: x[0])
-        if write_conf_file:
-            config = ConfigObj()
-            config.filename = f"{date_str}_{time_str}_fiducials.conf"
-            for i, point in enumerate(ordered):
-                key = f"fiducial_{i}"
-                config[key] = {}
-                config[key]['x_coord'] = point[0]
-                config[key]['y_coord'] = point[1]
-                config[key]['peak'] = point[2]
-                config[key]['FWHM'] = point[3]
-            config.write()
-            if not os.path.isdir(f"./data/{save_dir}"):
-                os.mkdir(f"./data/{save_dir}")
-            shutil.move(config.filename, f"./data/{save_dir}")
+        # date_str, time_str = get_datetime_string()
+        # unzipped_centroids = [list(t) for t in zip(*centroids)]
+        # # sort fiducial points left to right
+        # ordered = sorted(listify(zip(unzipped_centroids[0], unzipped_centroids[1], peaks, FWHM)), key=lambda x: x[0])
+        # if self.flags.write_conf_file:
+        #     config = ConfigObj()
+        #     config.filename = f"{date_str}_{time_str}_fiducials.conf"
+        #     for i, point in enumerate(ordered):
+        #         key = f"fiducial_{i}"
+        #         config[key] = {}
+        #         config[key]['x_coord'] = point[0]
+        #         config[key]['y_coord'] = point[1]
+        #         config[key]['peak'] = point[2]
+        #         config[key]['FWHM'] = point[3]
+        #     config.write()
+        #     if not os.path.isdir(f"./data/{save_dir}"):
+        #         os.mkdir(f"./data/{save_dir}")
+        #     shutil.move(config.filename, f"./data/{save_dir}")
 
         return centroids, peaks, FWHM
-
-    @staticmethod
-    def unpack_fiducial_conf(filename):
-        config = ConfigObj(filename)
-        fid_list = []
-        for fid in config.values():
-            fid_list.append([float(fid['x_coord']), float(fid['y_coord'])])
-        return sorted(fid_list, key=lambda x: x[0])
-
+ 
     """Takes in list of centroid coordinates of a fiducial and computes the microns to pixel ratio. Assumes fiducials
     are ordered from left to right"""
 
-    # TODO: add code to take in rotational orientation of fiducials
     @staticmethod
     def camera_scale_from_fiducial(fiducials):
-        dist_0_1 = distance(fiducials[0], fiducials[1])  # should be 1.2mm
-        dist_0_3 = distance(fiducials[0], fiducials[3])  # should be 1.6mm
-        dist_1_3 = distance(fiducials[1], fiducials[3])  # should be 2mm
-        return np.mean([1200 / dist_0_1, 1600 / dist_0_3, 2000 / dist_1_3])
+        distances = []
+        for i in range(4):
+            for j in range(i + 1, 4):
+                distances.append(distance(fiducials[i], fiducials[j]))
+        distances = sorted(distances)
+        pixels = []
+        for i in range(3):
+            pixels.append(1000 / distances[i])
+        pixels.append(1200 / distances[3])
+        pixels.append(1600 / distances[4])
+        pixels.append(2000 / distances[5])
+        return np.mean(pixels)
 
     """Lowers the brightness of centroids until FWHM of all centroids is < threshold"""
 
@@ -330,27 +335,33 @@ class MoveMeasure:
     """Takes repeat number of images of the fiducial, computes, returns, and sets class attributes for the fiducial 
     offset and camera scale"""
 
-    def calibrate_fiducial(self, win_x, win_y, repeat=1, write_files=False):
+    def calibrate_fiducial(self, repeat=1, win_x=None, win_y=None):
         # TODO: check if fiducial moves between images, if so adjust brightness
-        self.set_fiducial_window(win_x, win_y)
+        if win_x and win_y:
+            self.set_fiducial_window(win_x, win_y)
         date_str, time_str = get_datetime_string()
         dir_name = f"{date_str}_{time_str}_fiducial_calibration"
-        if write_files:
+        if self.flags.any():
             os.makedirs(f"./data/{dir_name}")
         fid_0 = []
         fid_1 = []
         fid_2 = []
         fid_3 = []
+        fid_peaks = []
+        fid_FWHM = []
         camera_scales = []
         for i in range(repeat):
-            centroids, peaks, FWHM = self.get_fiducial_centroids(write_files, write_files, write_files,
-                                                                 save_dir=dir_name)
-            centroids = sorted(centroids, key=lambda x: x[0])
+            centroids, peaks, FWHM = self.get_fiducial_centroids(save_dir=dir_name)
+            cpf = listify(zip(centroids, peaks, FWHM))
+            cpf = sorted(cpf, key=lambda x: x[0][0])
+            centroids = sorted(centroids, key=lambda x:x[0])
             camera_scales.append(self.camera_scale_from_fiducial(centroids))
             fid_0.append(centroids[0])
             fid_1.append(centroids[1])
             fid_2.append(centroids[2])
             fid_3.append(centroids[3])
+            fid_peaks.append([lst[1] for lst in cpf])
+            fid_FWHM.append([lst[2] for lst in cpf])
         # perform sanity check to make sure fiducial does not move between images
         if point_spread(fid_0) > self.movement_threshold or point_spread(fid_1) > self.movement_threshold \
                 or point_spread(fid_2) > self.movement_threshold \
@@ -365,14 +376,32 @@ class MoveMeasure:
         fid_2_center = np.mean(fid_2, axis=0)
         fid_3_center = np.mean(fid_3, axis=0)
         fid_centers = [fid_0_center, fid_1_center, fid_2_center, fid_3_center]
+        fid_peak_mean = np.mean(fid_peaks, axis=0)
+        fid_FWHM_mean = np.mean(fid_FWHM, axis=0)
+
+        if self.flags.write_conf_file:
+            config = ConfigObj()
+            config.filename = f"{date_str}_{time_str}_fiducials.conf"
+            for i, point in enumerate(fid_centers):
+                key = f"fiducial_{i}"
+                config[key] = {}
+                config[key]['x_coord'] = point[0]
+                config[key]['y_coord'] = point[1]
+                config[key]['peak'] = fid_peak_mean[i]
+                config[key]['FWHM'] = fid_FWHM_mean[i]
+            config.write()
+            if not os.path.isdir(f"./data/{dir_name}"):
+                os.mkdir(f"./data/{dir_name}")
+            shutil.move(config.filename, f"./data/{dir_name}")
+
         fid_center = np.mean(fid_centers, axis=0)
         self.fiducial_center = [fid_center[0], fid_center[1]]
         return self.fiducial_center, self.microns_per_pixel
 
     def check_broadcast(self):
-        points_b, peaks_b, FWHM_b = self.get_centroids(write_fits_file=True, nspots=17, save_dir='test_broadcast')
+        points_b, peaks_b, FWHM_b = self.get_centroids(nspots=17, save_dir='test_broadcast')
         self.fipos.move_direct(None, direction='ccw', motor='phi')
-        points_a, peaks_a, FWHM_a = self.get_centroids(write_fits_file=True, nspots=17, save_dir='test_broadcast')
+        points_a, peaks_a, FWHM_a = self.get_centroids(nspots=17, save_dir='test_broadcast')
         return len(self.find_moved(points_b, points_a)), points_b, points_a
 
     """Given 2 lists of positions of positioners, finds which positioners moved/changed positions"""
@@ -441,7 +470,7 @@ class MoveMeasure:
     positioners"""
 
     # TODO: have this function init positioners
-    def match_positioners(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
+    def match_positioners(self, nspots=1, fboxsize=7):
         can_command_out = self.fipos.get_can_address()
         pos_ids = can_command_out[2]['can0'].keys()
         date_str, time_str = get_datetime_string()
@@ -451,9 +480,8 @@ class MoveMeasure:
         pos_conf.filename = f"positioners.conf"
         pos_number = 0
         # take an image before moving anything
-        centroids_before, peaks_before, FWHM_before = self.get_centroids(write_fits_file, write_region_file,
-                                                                         False, nspots, fboxsize,
-                                                                         save_dir=dir_name)
+        centroids_before, peaks_before, FWHM_before = self.get_centroids(nspots, fboxsize, save_dir=dir_name)
+
         for pos_id in pos_ids:
             # TODO: NO MAGIC NUMBERS
             # ID 10000 corresponds to fiducial
@@ -461,9 +489,8 @@ class MoveMeasure:
                 # take image and compute centroids after moving
                 to_move = {'can0': {pos_id: pos_id}}
                 self.fipos.move_direct(to_move, 'cw', motor='phi')
-                centroids_after, peaks_after, FWHM_after = self.get_centroids(write_fits_file, write_region_file,
-                                                                              False, nspots, fboxsize,
-                                                                              save_dir=dir_name)
+                centroids_after, peaks_after, FWHM_after = self.get_centroids(nspots, fboxsize, save_dir=dir_name)
+
                 try:
                     moved = self.find_moved_match(centroids_before, centroids_after)
                     pos_number = self.set_pos_config(pos_conf, f"positioner_{pos_number}", pos_number, moved, pos_id)
@@ -472,9 +499,7 @@ class MoveMeasure:
                     try:
                         self.fipos.move_direct(to_move, 'ccw', motor='phi')
                         print('Tried moving other direction!')
-                        centroids_after, peaks_after, FWHM_after = self.get_centroids(write_fits_file,
-                                                                                      write_region_file,
-                                                                                      False, nspots, fboxsize,
+                        centroids_after, peaks_after, FWHM_after = self.get_centroids(nspots, fboxsize,
                                                                                       save_dir=dir_name)
                         moved = self.find_moved_match(centroids_before, centroids_after)
                         pos_number = self.set_pos_config(pos_conf, f"positioner_{pos_number}", pos_number, moved,
@@ -502,6 +527,22 @@ class MoveMeasure:
             y.append(float(centroid['y_coord']))
             can_ids.append(int(centroid['can_id']))
         return x, y, can_ids
+
+    def unpack_and_init_pos_conf_phi(self, filename):
+        config = ConfigObj(filename)
+        for val in config.values():
+            pos = positioner.Positioner()
+            pos.bus_id = int(val['bus_id'])
+            pos.page_id = int(val['page_id'])
+            pos.phi_arm_length = float(val['phi_arm_length'])
+            pos.phi_center = list(map(float, val['phi_center']))
+            pos.phi_error = float(val['phi_error'])
+            pos.previous_positions = [list(map(float, x.strip('[]').split(','))) for x in val['previous_positions']]
+            pos.phi_calib_positions = [list(map(float, x.strip('[]').split(','))) for x in val['phi_calib_positions']]
+            pos.window_x = list(map(int, val['window_x']))
+            pos.window_y = list(map(int, val['window_y']))
+            self.positioners[int(val['bus_id'])] = pos
+            self.page_to_bus[int(val['page_id'])] = int(val['bus_id'])
 
     """Given a list of points of the form [x, y, ...] or [x, y, bus_id], returns a dictionary of those items keyed by 
     page id or bus id"""
@@ -542,7 +583,7 @@ class MoveMeasure:
             self.positioners[point[2]] = pos
             self.page_to_bus[page_id] = point[2]
 
-    def find_hardstop_phi(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
+    def find_hardstop_phi(self, nspots=1, fboxsize=7):
         pass
 
     def remove_fiducial_centroids(self, centroids):
@@ -555,13 +596,17 @@ class MoveMeasure:
                 positioner_centroids.append(centroid)
         return positioner_centroids
 
-    def calibrate_phi(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
+    def init_positioners_phi(self, init_filename):
+        pass
+
+    def calibrate_phi(self, nspots=1, fboxsize=7):
         date_str, time_str = get_datetime_string()
         dir_name = f"{date_str}_{time_str}_phi_calibration"
+        # TODO: creep to hardstop
         # quick reset to hardstop
         self.fipos.move_direct(None, motor='phi', angle=200, direction='cw')
         # take initial image
-        centroids, peak, FWHM = self.get_centroids(write_fits_file=True, save_dir=dir_name, nspots=17)
+        centroids, peak, FWHM = self.get_centroids(save_dir=dir_name, nspots=17)
         centroids = self.remove_fiducial_centroids(centroids)
         page_id_to_position = self.page_label(centroids)
         for page_id, position in page_id_to_position.items():
@@ -571,17 +616,39 @@ class MoveMeasure:
 
         for i in range(17):
             self.fipos.move_direct(None, direction='ccw', motor='phi', angle=10)
-            centroids, peak, FWHM = self.get_centroids(write_fits_file=True, save_dir=dir_name, nspots=17)
+            centroids, peak, FWHM = self.get_centroids(save_dir=dir_name, nspots=17)
             centroids = self.remove_fiducial_centroids(centroids)
             page_id_to_position = self.page_label(centroids)
             for page_id, position in page_id_to_position.items():
                 bus_id = self.page_to_bus[page_id]
                 self.positioners[bus_id].current_position = position
                 self.positioners[bus_id].phi_calib_positions.append(position)
-                self.positioners[bus_id].previous_postions.append(position)
+                self.positioners[bus_id].previous_positions.append(position)
 
         for positioner in self.positioners.values():
             positioner.compute_phi_arm_params(self.microns_per_pixel)
+
+        if self.flags.write_conf_file:
+            config = ConfigObj()
+            config.filename = f"{date_str}_{time_str}_positioners_phi"
+            for id in self.positioners.keys():
+                pos = self.positioners[id]
+                page_id = pos.page_id
+                key = f"positioner_{page_id}"
+                config[key] = {}
+                config[key]['bus_id'] = pos.bus_id
+                config[key]['page_id'] = pos.page_id
+                config[key]['phi_arm_length'] = pos.phi_arm_length
+                config[key]['phi_center'] = pos.phi_center
+                config[key]['phi_error'] = pos.phi_error
+                config[key]['previous_positions'] = pos.previous_positions
+                config[key]['phi_calib_positions'] = pos.phi_calib_positions
+                config[key]['window_x'] = pos.window_x
+                config[key]['window_y'] = pos.window_y
+            config.write()
+            if not os.path.isdir(f"./data/{dir_name}"):
+                os.mkdir(f"./data/{dir_name}")
+            shutil.move(config.filename, f"./data/{dir_name}")
 
     def calibrate_single_phi(self):
         # reset to hardstop
@@ -591,11 +658,11 @@ class MoveMeasure:
         self.set_window('crop', [600, 650], [995, 1045])
         positions = []
         # take initial image
-        centroid, peak, FWHM = self.get_centroids(write_fits_file=True, save_dir='single_calibration')
+        centroid, peak, FWHM = self.get_centroids(save_dir='single_calibration')
         positions.append(centroid)
         for i in range(18):
             self.fipos.move_direct(to_move, direction='ccw', motor='phi', angle=10)
-            centroid, peak, FWHM = self.get_centroids(write_fits_file=True, save_dir='single_calibration')
+            centroid, peak, FWHM = self.get_centroids(save_dir='single_calibration')
             positions.append(centroid)
             x_lower = int(centroid[0][0] - 25)
             x_upper = int(centroid[0][0] + 25)
@@ -605,9 +672,34 @@ class MoveMeasure:
         return positions
 
     def calibrate_theta(self, write_fits_file=False, write_region_file=False, fboxsize=7):
-        pass
+        date_str, time_str = get_datetime_string()
+        dir_name = f"{date_str}_{time_str}_theta_calibration"
+        # quick reset to hardstop
+        self.fipos.move_direct(None, motor='phi', angle=200, direction='cw')
+        # take initial image
+        centroids, peak, FWHM = self.get_centroids(save_dir=dir_name, nspots=17)
+        centroids = self.remove_fiducial_centroids(centroids)
+        page_id_to_position = self.page_label(centroids)
+        for page_id, position in page_id_to_position.items():
+            bus_id = self.page_to_bus[page_id]
+            self.positioners[bus_id].current_position = position
+            # self.positioners[bus_id].phi_calib_positions.append(position)
 
-    def rough_find_hardstop_phi(self, write_fits_file=False, write_region_file=False, nspots=1, fboxsize=7):
+        for i in range(17):
+            self.fipos.move_direct(None, direction='ccw', motor='theta', angle=10)
+            centroids, peak, FWHM = self.get_centroids(save_dir=dir_name, nspots=17)
+            centroids = self.remove_fiducial_centroids(centroids)
+            page_id_to_position = self.page_label(centroids)
+            for page_id, position in page_id_to_position.items():
+                bus_id = self.page_to_bus[page_id]
+                self.positioners[bus_id].current_position = position
+                self.positioners[bus_id].theta_calib_positions.append(position)
+                self.positioners[bus_id].previous_positions.append(position)
+
+        for positioner in self.positioners.values():
+            positioner.compute_theta_arm_params(self.microns_per_pixel)
+
+    def rough_find_hardstop_phi(self, nspots=1, fboxsize=7):
         # self.fipos.move_direct(None, angle=200, motor='phi')
         # self.fipos.move_direct(None, speed='creep', angle=3, motor='phi')
         # points_b, peaks_b, FWHM_b = self.get_centroids(write_fits_file, write_region_file, False, nspots, fboxsize)
@@ -615,7 +707,7 @@ class MoveMeasure:
         # points_a, peaks_a, FWHM_a = self.get_centroids(write_fits_file, write_region_file, False, nspots, fboxsize)
         # return self.find_moved(points_b, points_a, 1), points_a
         points = []
-        all_points, peaks, FWHM = self.get_centroids(write_fits_file, write_region_file, False, nspots, fboxsize)
+        all_points, peaks, FWHM = self.get_centroids(nspots, fboxsize)
         for point in all_points:
             if not self.in_fiducial_window(point):
                 points.append(point)
